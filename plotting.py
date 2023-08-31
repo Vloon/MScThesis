@@ -1,4 +1,3 @@
-# Basics
 import os
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc, Ellipse
@@ -15,39 +14,6 @@ from blackjax.smc.tempered import TemperedSMCState
 
 from helper_functions import *
 
-# if __name__ == "__main__":
-#     # Create cmd argument list (arg_name, var_name, type, default, nargs[OPT])
-#     arguments = [('-if', 'input_folder', str, 'Embeddings'),  # filename of the embeddings
-#                  ('-s1', 'subject1', int, 0), # first subject to be used
-#                  ('-sn', 'subjectn', int, 25), # last subject to be used (inclusive)
-#                  ('-et', 'edge_type', str, 'con'),  # Edge type: 'con' for continuous or 'bin' for binary edges
-#                  ('-g', 'geometry', str, 'hyp'), # Latent space geometry: 'hyp' for hyperbolic or 'euc' for euclidean
-#                  ('-tf', 'task_file', str, 'task_list.txt'), # filename of the list of task names
-#                  ('-of', 'output_folder', str, 'Figures'), # folder where to dump the LSM embeddings
-#                  ('-gpu', 'gpu', str, ''), # Number of gpu to use (in string form). If no GPU is specified, CPU is used.
-#                  ('-fs', 'figsize', int, 10), # Figure size
-#                  ]
-#
-#     # Get arguments from CMD
-#     global_params = get_cmd_params(arguments)
-#     input_folder = global_params['input_folder']
-#     subject1 = global_params['subject1']
-#     subjectn = global_params['subjectn']
-#     edge_type = global_params['edge_type']
-#     geometry = global_params['geometry']
-#     task_file = global_params['task_file']
-#     output_folder = global_params['output_folder']
-#     gpu = global_params['gpu']
-#     if gpu is None:
-#         gpu = ''
-#     figsize = global_params['figsize']
-#
-#     print(input_folder)
-#     print(output_folder)
-#
-#     # Set before USING JAX to avoid issues with seeing GPUs!
-#     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
-
 def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, linewidth:float=0.5, threshold:float=0.4) -> Axes:
     """
     PARAMS
@@ -55,7 +21,8 @@ def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, lin
     A (N,N) or (N*(N-1)/2) : (upper triangle of the) adjacency matrix.
     ax : axis to be plotted on
     R : disk radius
-    linewidth : Linewidth of the edges
+    linewidth : linewidth of the edges
+    threshold : minimum edge weight for the edge to be plotted
     """
     def mirror(p:ArrayLike, R:float=1) -> ArrayLike:
         """
@@ -173,6 +140,9 @@ def plot_euclidean_edges(p:ArrayLike,
     linewidth : width of the edges
     threshold : minimum edge weight for the edge to be plotted
     """
+    N, D = p.shape
+    assert D == 2, f'Dimension must be 2 to be plotted, but is {D}.'
+    M = N*(N-1)//2
     if ax is None:
         plt.figure()
         ax = plt.gca()
@@ -203,6 +173,7 @@ def plot_euclidean_edges(p:ArrayLike,
 
 def plot_network(A:ArrayLike,
                  pos:ArrayLike,
+                 pos_labels:ArrayLike=None,
                  ax:Axes=None,
                  title:str=None,
                  node_color:list=None,
@@ -219,6 +190,7 @@ def plot_network(A:ArrayLike,
     PARAMS:
     A : (M,) or (N, N) adjacency matrix (or its upper triangle)
     pos : (N, 2) positions of the nodes
+    pos_labels : (N,) list of labels for the nodes in the network.
     ax : axis to plot the network on
     title : title to display
     node_color : list of valid plt colors for the nodes. defaults to N*['k']
@@ -240,7 +212,7 @@ def plot_network(A:ArrayLike,
     N = A.shape[0]
     assert pos.shape[1] == 2, f'The 2nd dimension of pos must be 2 but is {pos.shape[1]}'
     assert A.shape[1] == N and pos.shape[0] == N, f'Invalid shapes between obs: {A.shape} and pos: {pos.shape}'
-
+    assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
     if node_color is None:
         node_color = N*['k']
     clean_ax = True
@@ -280,6 +252,7 @@ def plot_network(A:ArrayLike,
 
 def plot_posterior(pos_trace:ArrayLike,
                    edges:ArrayLike=None,
+                   pos_labels:ArrayLike=None,
                    ax:Axes=None,
                    title:str=None,
                    edge_width:float=0.5,
@@ -287,16 +260,17 @@ def plot_posterior(pos_trace:ArrayLike,
                    hyperbolic:bool=False,
                    continuous:bool=False,
                    bkst:bool=False,
-                   legend:bool=False,
                    threshold:float=0.4,
                    margin:float=0.1,
                    s:float=0.5,
-                   alpha_margin:float=0.005) -> Axes:
+                   alpha_margin:float=0.005,
+                   hemisphere_symbols:ArrayLike=['s', '^']) -> Axes:
     """
     Plots a network with the given positions.
     PARAMS:
     pos_trace : (n_steps, N, D+1) trace of the positions
-    edges : (M,) edge weight or binary edges between positions
+    edges : (M,) edge weight or binary edges between positions. If None, no edges are drawn.
+    pos_labels : (N,) list of labels for the nodes in the network. All labels should start with 'Left' or 'Right'
     ax : axis to plot the network in
     title : title to display
     edge_width : width of the edges
@@ -310,9 +284,14 @@ def plot_posterior(pos_trace:ArrayLike,
     alpha_margin : transparancy margin to ensure the most variable position does not have alpha=0.
     """
     pos_trace = np.array(pos_trace) # Convert to Numpy, probably from JAX.Numpy
-    edges = np.array(edges)
+    pos_labels = np.array(pos_labels)
     n_steps, N, D = pos_trace.shape
-    assert D == 2, 'Dimension must be 2 to be plotted. If plotting hyperbolic, convert to Poincaré coordinates beforehand.'
+    assert D == 2, f'Dimension must be 2 to be plotted, but is {D}. If plotting hyperbolic, convert to Poincaré coordinates beforehand.'
+    assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
+    M = N*(N-1)//2
+    if edges is not None:
+        edges = np.array(edges)
+        assert len(edges) == M, f'Length of edges must be {M} but is {len(edges)}'
     clean_ax = True
     if ax is None:
         plt.figure(facecolor='w')
@@ -328,9 +307,10 @@ def plot_posterior(pos_trace:ArrayLike,
         if hyperbolic:
             if bkst:  # Add jitter to Bookstein coordinates for plottability
                 pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
-            plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold, continuous=continuous, bkst=bkst)
+            plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
         else:
             plot_euclidean_edges(pos_mean, edges, ax, edge_width)
+
     # MID: Plot standard deviations
     for n in range(N):
         std = float(np.max(pos_std_nml[n,:]))
@@ -338,13 +318,31 @@ def plot_posterior(pos_trace:ArrayLike,
         ax.add_patch(point)
 
     # TOP: Plot node means
-    if bkst: # Make bookstein coordinates red
-        ax.scatter(pos_mean[:2,0], pos_mean[:2,1], c='r', s=s, label='Bookstein coordinates')
-        ax.scatter(pos_mean[2:,0], pos_mean[2:,1], c='k', s=s)
-        if legend:
-            ax.legend(loc='best', bbox_to_anchor=(1.01, 0.5))
-    else:
-        ax.scatter(pos_mean[:,0], pos_mean[:,1], c='k', s=s)
+    if pos_labels is not None: # Add position labels
+        hemispheres = [lab[0] for lab in pos_labels]
+        brain_region = [lab[1] for lab in pos_labels]
+        unique_hemis = np.unique(hemispheres)
+        unique_regions = np.unique(brain_region)
+        assert len(unique_hemis) == len(hemisphere_symbols), f'Length of hemisphere_symbols should match unique number of hemispheres but they are {len(hemisphere_symbols)} and {len(unique_hemis)} respectively.'
+        for i, hs in enumerate(unique_hemis):
+            plt.scatter(0, 0, c='k', marker=hemisphere_symbols[i], label=hs, alpha=1) # Plot one invisible point per marker for plotting
+        for j, br in enumerate(unique_regions):
+            plt.scatter(0, 0, marker='.', markeredgecolor='k', label=br, alpha=1)  # Plot one invisible point per color for plotting
+        plt.legend(ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5))
+        # Now plot the actual data without labels
+        for i, hs in enumerate(unique_hemis):
+            for j, br in enumerate(brain_region):
+                plt.scatter(x=pos_mean[:,0],
+                            y=pos_mean[:,1],
+                            s=s,
+                            marker=hemisphere_symbols[i],
+                            markeredgecolor='k')
+    else: # Just plot the positions as default
+        if bkst:  # Make bookstein coordinates red
+            ax.scatter(pos_mean[:2, 0], pos_mean[:2, 1], c='r', s=s)
+            ax.scatter(pos_mean[2:, 0], pos_mean[2:, 1], c='k', s=s)
+        else:
+            ax.scatter(pos_mean[:, 0], pos_mean[:, 1], c='k', s=s)
 
     if title is not None:
         ax.set_title(title, color='k', fontsize='24')
@@ -377,10 +375,22 @@ def plot_log_marginal_likelihoods(lml:ArrayLike, n_particles:ArrayLike, n_mcmc_s
     ax.set_yticks(n_mcmc_steps)
     return ax
 
-def plot_metric(csv_file:str, x_name:str='n_particles', plt_x_name:str=None, y_name:str='lml', plt_y_name:str=None, label_by:str=None, plt_label_by:str=None, delim:str=';', plt_type:str='scatter', ax:Axes=None, color:str='#a3b23b', alpha:float=0.8):
+def plot_metric(csv_file:str,
+                x_name:str='n_particles',
+                plt_x_name:str=None,
+                y_name:str='lml',
+                plt_y_name:str=None,
+                label_by:str=None,
+                plt_label_by:str=None,
+                delim:str=';',
+                plt_type:str='scatter',
+                ax:Axes=None,
+                color:str='#a3b23b',
+                alpha:float=0.8,
+                ):
     """
     Plots an independent parameter on the x-axis versus a dependent parameter on the y-axis. The latter can act as a metric of performance, like log-marginal likelihood or runtime
-    Both should be found in the csv file (sub, n_particles, n_mcmc_steps, task, runtime)
+    Both x and y values are indicated by a name, which should be found in the header of the csv file (sub, n_particles, n_mcmc_steps, task, runtime)
     PARAMS:
     csv_file : the location of the csv file containing the data (incl. folder). The csv starts with a row of headers, then a row of types
     x_name : the name of the column in the CSV file to use as the value on the x-axis
@@ -415,7 +425,7 @@ def plot_metric(csv_file:str, x_name:str='n_particles', plt_x_name:str=None, y_n
     data_dict = {h:[types[i](v) for v in values[:,i]] for i, h in enumerate(headers)}
     y_val = np.array(data_dict[y_name])
     x_val = np.array(data_dict[x_name])
-    # Asserting x/y lengths is unnecessary, otherwise the csv wouldn't load.
+    # Asserting x/y lengths is unnecessary, because the csv wouldn't load if they were different.
     if label_by is not None:
         label_val = np.array(data_dict[label_by])
 
@@ -423,6 +433,8 @@ def plot_metric(csv_file:str, x_name:str='n_particles', plt_x_name:str=None, y_n
         plt.figure()
         ax = plt.gca()
 
+    # Only rotate strings
+    rotation = 45 if type(x_val[0]) in [np.str_, str] else 0 ## Okay this is ugly but x_val.dtype = '<U1' while this gives np.str_
     if plt_type == 'scatter':
         if label_by is not None:
             unique_labels = np.unique(label_val)
@@ -432,26 +444,55 @@ def plot_metric(csv_file:str, x_name:str='n_particles', plt_x_name:str=None, y_n
                 plt.legend()
         else:
             plt.scatter(x_val, y_val, c=color, alpha=alpha)
+            plt.xticks(rotation=rotation)
     elif plt_type == 'bar':
-        # Get the means and std of the LML values, ordered by x value
-        unique_x = np.unique(x_val)
-        mean_y = np.zeros(len(unique_x))
-        std_y = np.zeros(len(unique_x))
-        for i, ux in enumerate(unique_x):
-            idc = np.where(x_val == ux)
-            mean_y[i] = np.mean(y_val[idc])
-            std_y[i] = np.std(y_val[idc])
-        x_plt = np.arange(len(unique_x))
-        plt.bar(x_plt, mean_y, yerr=std_y, color=color)
-        plt.xticks(x_plt, unique_x, rotation=45)
+        bar_width = 0.8 # WE SHOULDN'T GIVE THIS AS A USER DEFINED PARAMETER. This is the default.
+        if label_by is not None:
+            # Get the means and std of the LML values, ordered by x value
+            unique_x = np.unique(x_val)
+            unique_labels = np.unique(label_val)
+            mean_y = np.zeros((len(unique_x), len(unique_labels)))
+            std_y = np.zeros((len(unique_x), len(unique_labels)))
+            for i, ux in enumerate(unique_x):
+                x_idc = np.array([i for i, x in enumerate(x_val) if x == ux])
+                for j, ul in enumerate(unique_labels):
+                    l_idc = np.array([i for i, l in enumerate(label_val) if l == ul]) # Use list comprehension because string == np.array returns a single Bool (probably because string is a character array)
+                    idc_intersect = np.intersect1d(x_idc, l_idc)
+                    mean_y[i,j] = np.mean(y_val[idc_intersect])
+                    std_y[i,j] = np.std(y_val[idc_intersect])
+            x_plt = np.arange(len(unique_x))*len(unique_labels)*1.5
+            for j, ul in enumerate(unique_labels):
+                x_offset = j-len(unique_labels)/2
+                plt.bar(x = x_plt+x_offset,
+                        height = mean_y[:,j],
+                        yerr = std_y[:,j],
+                        align='center',
+                        label=f'{plt_label_by} = {ul}')
+            plt.xticks(ticks=x_plt, labels=unique_x, rotation=rotation)
+            plt.legend()
+        else:
+            # Get the means and std of the LML values, ordered by x value
+            unique_x = np.unique(x_val)
+            mean_y = np.zeros(len(unique_x))
+            std_y = np.zeros(len(unique_x))
+            for i, ux in enumerate(unique_x):
+                idc = np.where(x_val == ux)
+                mean_y[i] = np.mean(y_val[idc])
+                std_y[i] = np.std(y_val[idc])
+            x_plt = np.arange(len(unique_x))
+            plt.bar(x_plt, mean_y, yerr=std_y, color=color)
+            plt.xticks(ticks=x_plt, labels=unique_x, rotation=rotation)
     elif plt_type == 'box':
         unique_x = np.unique(x_val)
         y_box = []
         for ux in unique_x:
             idc = np.where(x_val == ux)
             y_box.append(y_val[idc])
-        plt.boxplot(y_box, notch=True)
-        plt.xticks(np.arange(len(y_box))+1, labels=unique_x)
+        x_plt = np.arange(len(unique_x))
+        plt.boxplot(y_box,
+                    notch=True,
+                    positions=x_plt)
+        plt.xticks(x_plt, labels=unique_x, rotation=rotation)
     plt.xlabel(plt_x_name)
     plt.ylabel(plt_y_name)
     return ax

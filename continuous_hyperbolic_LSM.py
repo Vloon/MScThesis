@@ -28,6 +28,7 @@ from blackjax.smc.base import SMCInfo
 from typing import Callable, Tuple
 from pprint import pprint
 
+# Keep this here in case you somehow import the file and need these constants??
 mu = [0., 0.]
 eps = 1e-6
 sigma = 1.
@@ -43,8 +44,9 @@ rmh_sigma = 1e-2
 data_filename = 'processed_data.pkl'
 task_filename = 'task_list.txt'
 base_output_folder = 'Embeddings'
-# Keep this here in case you somehow import the file and need these constants??
 make_plot = False
+figure_folder = 'Figures'
+label_location = 'Figures/prettylabels.npz'
 do_print = False
 save_stats = False
 stats_filename = 'statistics.csv'
@@ -71,6 +73,8 @@ if __name__ == "__main__":
                  ('-tf', 'task_filename', str, task_filename), # filename of the list of task names
                  ('-of', 'base_output_folder', str, base_output_folder), # folder where to dump the LSM embeddings
                  ('--plot', 'make_plot', bool), # whether to create a plot
+                 ('-ff', 'figure_folder', str, figure_folder), # base folder where to dump the figures
+                 ('-lab', 'label_location', str, label_location), # file location of the labels
                  ('--print', 'do_print', bool), # whether to print cute info
                  ('--stats', 'save_stats', bool), # whether to save the statistics in a csv
                  ('-stf', 'stats_filename', str, stats_filename),  # statistics filename
@@ -99,6 +103,8 @@ if __name__ == "__main__":
     task_filename = global_params['task_filename']
     output_folder = global_params['base_output_folder']+f'/{n_particles}p{n_mcmc_steps}s'
     make_plot = global_params['make_plot']
+    figure_folder = global_params['figure_folder']
+    label_location = global_params['label_location']
     do_print = global_params['do_print']
     save_stats = global_params['save_stats']
     stats_filename = f"{global_params['stats_folder']}/{global_params['stats_filename']}"
@@ -112,15 +118,16 @@ if __name__ == "__main__":
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
 
     # Initialize JAX stuff
-    print(f'Running on {jax.devices()}')
+    if do_print:
+        print(f'Running on {jax.devices()}')
     key = jax.random.PRNGKey(key)
 
     # Create output folder if it does not yet exist
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-# ONLY NOW TURN MU INTO JNP ARRAY, OTHERWISE JAX WILL F*** WITH THE GPUs THE WRONG WAY!!
-mu = jnp.array(mu)
+    # ONLY NOW TURN MU INTO JNP ARRAY, OTHERWISE JAX WILL F*** WITH THE GPUs THE WRONG WAY!!
+    mu = jnp.array(mu)
 
 def get_default_params() -> dict:
     """
@@ -409,6 +416,11 @@ if __name__ == "__main__":
     ### We go through each subject/task, and take both encodings as seperate observations to create 1 embedding.
     ###
 
+    # Load plt labels here to avoid opening in a loop
+    if make_plot:
+        label_data = np.load(label_location)
+        plt_labels = label_data[label_data.files[0]]
+
     obs, tasks = load_observations(data_filename, task_filename, subject1, subjectn, M) 
 
     for si, n_sub in enumerate(range(subject1, subjectn+1)):
@@ -432,15 +444,23 @@ if __name__ == "__main__":
                 last__z_positions = smc_embedding.particles['_z']
                 z_positions = lorentz_to_poincare(get_attribute_from_trace(last__z_positions, get_det_params, 'z', shape=(n_particles, N, D+1)))
 
+                ## ADD LABELS!
                 # Plot posterior
                 plt.figure()
                 ax = plt.gca()
-                plot_posterior(z_positions, edges=obs[0], ax=ax, hyperbolic=True, bkst=True)
+                plot_posterior(z_positions,
+                               edges=obs[si, ti, 0],
+                               pos_labels=plt_labels,
+                               ax=ax,
+                               hyperbolic=True,
+                               bkst=True)
                 poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
                 ax.add_patch(poincare_disk)
                 plt.title(f'Proposal S{n_sub} {task}')
                 # Save figure
-                fig_output_folder = f'Figures/{n_particles}p{n_mcmc_steps}s'
+                fig_output_folder = f'{figure_folder}/{n_particles}p{n_mcmc_steps}s'
+                if not os.path.exists(fig_output_folder): # Create folder if it does not yet exist
+                    os.makedirs(fig_output_folder)
                 savefile = f'./{fig_output_folder}/con_hyp_S{n_sub}_{task}.png'
                 plt.savefig(savefile)
                 plt.close()
