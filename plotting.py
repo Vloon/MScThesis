@@ -284,10 +284,11 @@ def plot_posterior(pos_trace:ArrayLike,
     alpha_margin : transparancy margin to ensure the most variable position does not have alpha=0.
     """
     pos_trace = np.array(pos_trace) # Convert to Numpy, probably from JAX.Numpy
-    pos_labels = np.array(pos_labels)
     n_steps, N, D = pos_trace.shape
     assert D == 2, f'Dimension must be 2 to be plotted, but is {D}. If plotting hyperbolic, convert to Poincaré coordinates beforehand.'
-    assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
+    if pos_labels is not None:
+        pos_labels = np.array(pos_labels)
+        assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
     M = N*(N-1)//2
     if edges is not None:
         edges = np.array(edges)
@@ -336,7 +337,7 @@ def plot_posterior(pos_trace:ArrayLike,
                             y=pos_mean[:,1],
                             s=s,
                             marker=hemisphere_symbols[i],
-                            markeredgecolor='k')
+                            color='k')
     else: # Just plot the positions as default
         if bkst:  # Make bookstein coordinates red
             ax.scatter(pos_mean[:2, 0], pos_mean[:2, 1], c='r', s=s)

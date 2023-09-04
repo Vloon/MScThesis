@@ -1,9 +1,9 @@
 # Basics
+import os
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc, Ellipse
 import matplotlib.colors as mcolors
 import numpy as np
-# import networkx as nx
 import time
 import argparse 
 
@@ -27,6 +27,16 @@ from matplotlib import axes as Axes # I want types to be capitalized for some re
 from typing import Callable, Tuple
 
 ## Parser
+def set_GPU(gpu:str = '') -> None:
+    """
+    Sets the GPU safely in os.environ
+    PARAMS:
+    gpu : string format of the GPU used. Multiple GPUs can be seperated with commas, e.g. '0,1,2'
+    """
+    if gpu is None: # Safety, if visible divises is set to none in os, then all GPUs are used
+        gpu = ''
+    os.environ['CUDA_VISIBLE_DEVICES'] = gpu
+
 def get_cmd_params(parameter_list:list) -> dict:
     """
     Gets the parameters described in parameter_list from the command line.
@@ -63,6 +73,14 @@ def get_cmd_params(parameter_list:list) -> dict:
     return global_params
 
 ## Data stuff
+def is_valid(x:ArrayLike) -> bool:
+    """
+    Checks whether all values in an array are valid, and returns the bad indices
+    PARAMS:
+    x : input array
+    """
+    return np.all(np.isfinite(x)), np.where(~np.isfinite(x))
+
 def load_observations(data_filename:str, task_filename:str, subject1:int, subjectn:int, M:int) -> Tuple[jnp.ndarray, list]:
     """
     Loads the observations from the filename into a jax.numpy array, seperated by task found in task_filename. Takes both encodings as seperate observations of the same stimulus. 

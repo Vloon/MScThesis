@@ -17,7 +17,6 @@ import jax.numpy as jnp
 import jax.scipy.stats as jstats
 import blackjax as bjx
 import blackjax.smc.resampling as resampling
-print('Using blackjax version',bjx.__version__)
 # Typing
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
@@ -111,14 +110,11 @@ if __name__ == "__main__":
     dl = global_params['dl']
     key = global_params['key']
     gpu = global_params['gpu']
-    if gpu is None: # <-- if visible cuda in os.environ is set to None, ALL GPUs will be used. Empty string means CPU is used.
-        gpu = ''
-
-    # Set before using any JAX functions to avoid issues with seeing GPUs!
-    os.environ['CUDA_VISIBLE_DEVICES'] = gpu
+    set_GPU(gpu)
 
     # Initialize JAX stuff
     if do_print:
+        print('Using blackjax version', bjx.__version__)
         print(f'Running on {jax.devices()}')
     key = jax.random.PRNGKey(key)
 
@@ -409,13 +405,12 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
     return key, n_iter, lml, lambdas, weights, ancestors, _z_proposals, s_proposals, states_rwm_smc
 
 if __name__ == "__main__":
+    """
+    Data is in a dictionary. The keys are defined by "S{n_sub}_{task}_{enc}", e.g. "S1_EMOTION_RL".
+    The values per key are the upper triangle of the correlation matrix (length M list).
+    We go through each subject/task, and take both encodings as seperate observations to create 1 embedding.
+    """
     
-    ###
-    ### Data is in a dictionary. The keys are defined by "S{n_sub}_{task}_{enc}", e.g. "S1_EMOTION_RL".
-    ### The values per key are the upper triangle of the correlation matrix (length M list).
-    ### We go through each subject/task, and take both encodings as seperate observations to create 1 embedding.
-    ###
-
     # Load plt labels here to avoid opening in a loop
     if make_plot:
         label_data = np.load(label_location)
@@ -450,7 +445,7 @@ if __name__ == "__main__":
                 ax = plt.gca()
                 plot_posterior(z_positions,
                                edges=obs[si, ti, 0],
-                               pos_labels=plt_labels,
+                               # pos_labels=None,
                                ax=ax,
                                hyperbolic=True,
                                bkst=True)
