@@ -12,7 +12,7 @@ from matplotlib import axes as Axes # I want types to be capitalized for some re
 from typing import Tuple, Callable
 from blackjax.smc.tempered import TemperedSMCState
 
-from helper_functions import *
+from helper_functions import triu2mat
 
 def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, linewidth:float=0.5, threshold:float=0.4) -> Axes:
     """
@@ -308,9 +308,9 @@ def plot_posterior(pos_trace:ArrayLike,
         if hyperbolic:
             if bkst:  # Add jitter to Bookstein coordinates for plottability
                 pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
-            plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
+            ax = plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
         else:
-            plot_euclidean_edges(pos_mean, edges, ax, edge_width)
+            ax = plot_euclidean_edges(pos_mean, edges, ax, edge_width)
 
     # MID: Plot standard deviations
     for n in range(N):
@@ -496,4 +496,31 @@ def plot_metric(csv_file:str,
         plt.xticks(x_plt, labels=unique_x, rotation=rotation)
     plt.xlabel(plt_x_name)
     plt.ylabel(plt_y_name)
+    return ax
+
+def plot_correlations(corr:ArrayLike,
+                      ax:Axes=None,
+                      cmap:str='viridis',
+                      add_colorbar:bool=False) -> Axes:
+    """
+    Plots the correlations as a heat map
+    PARAMS:
+    corr : (N,N) or (M,) correlation matrix, or its upper triangle
+    ax : the axis to plot on
+    cmap : the color map of the heat map
+    add_colorbar : whether to add a colorbar as legend-ish thing
+    """
+    corr = np.array(corr)
+    assert len(corr.shape) in [1,2], f'corr must have 1 or 2 dimensions, but as {len(corr.shape)}'
+    if len(corr.shape) == 1:
+        corr = triu2mat(corr)
+    if ax is None:
+        plt.figure()
+        ax = plt.gca()
+
+    im = ax.imshow(corr, cmap=cmap)
+
+    if add_colorbar:
+        ax.figure.colorbar(im, ax=ax)
+
     return ax

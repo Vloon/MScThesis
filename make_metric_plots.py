@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from plotting import plot_metric
+from plotting_functions import plot_metric
 from helper_functions import get_cmd_params
 
 arguments = [('-y', 'y_name', str, 'lml'),

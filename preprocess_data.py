@@ -23,8 +23,7 @@ data_path = global_params['data_path']
 task_file = global_params['task_file']
 output_file = global_params['output_file']
 partial = global_params['partial']
-gpu = global_params['gpu']
-set_GPU(gpu)
+set_GPU(global_params['gpu'])
 
 def partial_correlation(x:ArrayLike) -> ArrayLike:
     """
@@ -60,15 +59,10 @@ def import_data(subjects:ArrayLike=[], tasks:ArrayLike=[], phase_enc:ArrayLike=[
                 filename = 'timeseries_{}fMRI_{}_{}.npz'.format(task_type,task,enc)
                 keyname = '{}_{}_{}'.format(subject, task, enc)
                 timeseries_dic = dict(np.load(filename))
-                for series_type in timeseries_dic.keys(): ## Allows bandpass-filtered timeseries.
-                    if series_type[-3:] == 'bpf':
-                        new_keyname = '{}_bpf'.format(keyname)
-                        is_bpf = True
-                    else:
-                        new_keyname =  keyname
-                        is_bpf = False
-                    if ('{}_bpf'.format(new_keyname) not in data and incl_bpf) or (not incl_bpf and not is_bpf):
-                        data[new_keyname] = timeseries_dic[series_type]
+                for series_type in timeseries_dic.keys(): ## Contains both non-filtered and bandpass-filtered timeseries.
+                    is_bpf = series_type[-3:] == 'bpf'
+                    if ('{}_bpf'.format(keyname) not in data and incl_bpf) or (not incl_bpf and not is_bpf):
+                        data[keyname] = timeseries_dic[series_type]
                 # Delete files from disc again
                 os.remove(filename)
     return data
@@ -112,5 +106,3 @@ with open(output_file_nf, 'wb') as f:
 
 with open(output_file_bpf, 'wb') as f:
     pickle.dump(data_bpf, f)
-
-print('Done!')

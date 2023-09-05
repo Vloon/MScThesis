@@ -73,7 +73,7 @@ def get_cmd_params(parameter_list:list) -> dict:
     return global_params
 
 ## Data stuff
-def is_valid(x:ArrayLike) -> bool:
+def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
     """
     Checks whether all values in an array are valid, and returns the bad indices
     PARAMS:
@@ -81,9 +81,10 @@ def is_valid(x:ArrayLike) -> bool:
     """
     return np.all(np.isfinite(x)), np.where(~np.isfinite(x))
 
-def load_observations(data_filename:str, task_filename:str, subject1:int, subjectn:int, M:int) -> Tuple[jnp.ndarray, list]:
+def load_observations(data_filename:str, task_filename:str, subject1:int, subjectn:int, M:int) -> Tuple[np.ndarray, list, list]:
     """
-    Loads the observations from the filename into a jax.numpy array, seperated by task found in task_filename. Takes both encodings as seperate observations of the same stimulus. 
+    Loads the observations from the filename into a jax.numpy array, seperated by task found in task_filename. Takes both encodings as seperate observations of the same stimulus.
+    Returns the full (n_subjects, n_tasks, n_encs, n_edges) observation matrix, the list of task names, and the list of encoding direction names.
     PARAMS:
     data_filename : filename of the observed correlations data
     task_filename : name of the file containing a list of tasks plus a list of encodings (=observations per subject per task)
@@ -103,15 +104,15 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
     # Get observations for each subject for each task
     n_subjects = subjectn+1-subject1
     n_tasks = len(tasks)
-    obs = jnp.zeros((n_subjects, n_tasks, len(encs), M))
+    obs = np.zeros((n_subjects, n_tasks, len(encs), M))
 
+    print(list(obs_corr_dict.keys()))
     for si, n_sub in enumerate(range(subject1, subjectn+1)): # Doesn't have to be the same, you can go from subject 3 to subject 6
         for ti, task in enumerate(tasks):
-            for n_enc in range(len(encs)):
-                enc = encs[n_enc]
+            for ei, enc in enumerate(encs):
                 dict_key = f'S{n_sub}_{task}_{enc}'
-                obs = obs.at[si, ti, n_enc, :].set(obs_corr_dict[dict_key])
-    return obs, tasks
+                obs[si, ti, ei, :] = obs_corr_dict[dict_key]
+    return obs, tasks, encs
 
 def node_pos_dict2array(pos_dict:dict) -> np.ndarray:
     """
@@ -126,7 +127,7 @@ def node_pos_dict2array(pos_dict:dict) -> np.ndarray:
         pos_array[i, :] = pos_dict[i]
     return pos_array
 
-def triu2mat(v:ArrayLike) -> jnp.ndarray:
+def triu2mat(v:ArrayLike) -> ArrayLike:
     """
     Fills a matrix from upper triangle vector
     PARAMS:

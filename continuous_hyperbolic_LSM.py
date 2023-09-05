@@ -8,7 +8,7 @@ import time
 import os
 import csv
 
-from plotting import plot_posterior, plot_network
+from plotting_functions import plot_posterior, plot_network
 import matplotlib.pyplot as plt
 
 # Sampling
