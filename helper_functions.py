@@ -72,6 +72,20 @@ def get_cmd_params(parameter_list:list) -> dict:
     global_params = {arg:getattr(args,arg) for arg in vars(args)}
     return global_params
 
+def get_filename_with_ext(base_filename:str, partial:bool=False, bpf:bool=False, ext:str='pkl', folder:str='.') -> str:
+    """
+    Returns the filename of a .pkl file based on the base filename and a bunch of possible boolean parameters
+    E.g. {base_filename}_partial_bpf.pkl if all parameters are true.
+    PARAMS:
+    base_filename : the base name of the output file
+    partial : whether to use partial correlations
+    bpf : whether to use band-pass filtered rs-fMRI data
+    ext : file extension
+    """
+    partial_txt = '_partial' if partial else ''
+    bpf_txt = '_bpf' if bpf else ''
+    return f'{folder}/{base_filename}{partial_txt}{bpf_txt}.{ext}'
+
 ## Data stuff
 def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
     """
@@ -81,7 +95,18 @@ def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
     """
     return np.all(np.isfinite(x)), np.where(~np.isfinite(x))
 
-def load_observations(data_filename:str, task_filename:str, subject1:int, subjectn:int, M:int) -> Tuple[np.ndarray, list, list]:
+def open_taskfile(task_filename:str) -> Tuple[list, list]:
+    """
+    Opens the task file and return the tasks and encodings in a list
+    PARAMS:
+    task_filename : the path to the task file
+    """
+    with open(task_filename) as tf:
+        tasks = tf.readline().rstrip('\n').split(',')
+        encs = tf.readline().rstrip('\n').split(',')
+    return tasks, encs
+
+def load_observations(data_filename:str, task_filename:str, subject1:int, subjectn:int, M:int, abs:bool=True) -> Tuple[np.ndarray, list, list]:
     """
     Loads the observations from the filename into a jax.numpy array, seperated by task found in task_filename. Takes both encodings as seperate observations of the same stimulus.
     Returns the full (n_subjects, n_tasks, n_encs, n_edges) observation matrix, the list of task names, and the list of encoding direction names.
@@ -91,27 +116,25 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
     subject1 : first subject
     subjectn : last subject
     M : number of edges
+    abs : whether to take the absolute (partial) correlations
     """
     # Open the data file
     with open(data_filename, 'rb') as f:
         obs_corr_dict = pickle.load(f)
 
-    # Open task list file
-    with open(task_filename) as tf:
-        tasks = tf.readline().rstrip('\n').split(',')
-        encs = tf.readline().rstrip('\n').split(',')
+    tasks, encs = open_taskfile(task_filename)
 
     # Get observations for each subject for each task
     n_subjects = subjectn+1-subject1
     n_tasks = len(tasks)
     obs = np.zeros((n_subjects, n_tasks, len(encs), M))
 
-    print(list(obs_corr_dict.keys()))
     for si, n_sub in enumerate(range(subject1, subjectn+1)): # Doesn't have to be the same, you can go from subject 3 to subject 6
         for ti, task in enumerate(tasks):
             for ei, enc in enumerate(encs):
                 dict_key = f'S{n_sub}_{task}_{enc}'
-                obs[si, ti, ei, :] = obs_corr_dict[dict_key]
+                observed_values = jnp.abs(obs_corr_dict[dict_key]) if abs else obs_corr_dict[dict_key]
+                obs[si, ti, ei, :] = observed_values
     return obs, tasks, encs
 
 def node_pos_dict2array(pos_dict:dict) -> np.ndarray:

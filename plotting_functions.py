@@ -260,11 +260,11 @@ def plot_posterior(pos_trace:ArrayLike,
                    hyperbolic:bool=False,
                    continuous:bool=False,
                    bkst:bool=False,
-                   threshold:float=0.4,
+                   threshold:float=0.1,
                    margin:float=0.1,
                    s:float=0.5,
                    alpha_margin:float=0.005,
-                   hemisphere_symbols:ArrayLike=['s', '^']) -> Axes:
+                   hemisphere_symbols:list=['s', '^']) -> Axes:
     """
     Plots a network with the given positions.
     PARAMS:
@@ -345,7 +345,9 @@ def plot_posterior(pos_trace:ArrayLike,
         else:
             ax.scatter(pos_mean[:, 0], pos_mean[:, 1], c='k', s=s)
 
-    if title is not None:
+    if title: # Both None and empty string will be False
+        if threshold > 0:
+            title = f"{title}\nthreshold = {threshold:.2f}"
         ax.set_title(title, color='k', fontsize='24')
     margin = 1+margin
     ax.set(xlim=(-margin*disk_radius,margin*disk_radius),ylim=(-margin*disk_radius,margin*disk_radius))
@@ -501,7 +503,9 @@ def plot_metric(csv_file:str,
 def plot_correlations(corr:ArrayLike,
                       ax:Axes=None,
                       cmap:str='viridis',
-                      add_colorbar:bool=False) -> Axes:
+                      add_colorbar:bool=False,
+                      vmin:float=None,
+                      vmax:float=None) -> Axes:
     """
     Plots the correlations as a heat map
     PARAMS:
@@ -518,9 +522,41 @@ def plot_correlations(corr:ArrayLike,
         plt.figure()
         ax = plt.gca()
 
-    im = ax.imshow(corr, cmap=cmap)
+    im = ax.imshow(corr, cmap=cmap, vmin=vmin, vmax=vmax)
 
     if add_colorbar:
         ax.figure.colorbar(im, ax=ax)
+
+    return ax
+
+def plot_distance_vs_correlations(dist:ArrayLike,
+                                  corr:ArrayLike,
+                                  ax:Axes=None,
+                                  s:float=0.5,
+                                  color:str='k') -> Axes:
+    """
+    Plots the distance matrix against the correlations
+    PARAMS:
+
+    """
+    assert len(dist.shape) == 2 or len(dist.shape) == 1, f"Distance matrix must be matrix or upper triangle, but has {len(dist.shape)} dimensions"
+    assert len(corr.shape) == 2 or len(corr.shape) == 1, f"Correlation matrix must be matrix or upper triangle, but has {len(corr.shape)} dimensions"
+    dist = np.array(dist)
+    corr = np.array(corr)
+    if len(dist.shape) == 2:
+        N = len(dist)
+        dist = dist[np.triu_indices(N, k=1)]
+    if len(corr.shape) == 2:
+        N = len(corr)
+        corr = corr[np.triu_indices(N, k=1)]
+    assert len(corr) == len(dist), f"Distance matrix and correlation matrix must be same size but dist has shape {dist.shape} and corr has shape {corr.shape}"
+    if ax is None:
+        plt.figure()
+        ax = plt.gca()
+
+    ax.scatter(dist, corr, s=s, c=color)
+    ax.set_xlabel('Distance (normalized)')
+    ax.set_ylabel('Correlation')
+    ax.set_ylim(0,1)
 
     return ax

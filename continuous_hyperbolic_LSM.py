@@ -1,14 +1,16 @@
 # Home brew functions
-from helper_functions import *
-from bookstein_methods import *
+from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, load_observations, get_attribute_from_trace, \
+    invlogit, lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map
+from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace
+from plotting_functions import plot_posterior, plot_network
 
 # Basics
 import pickle
 import time
 import os
 import csv
+import numpy as np
 
-from plotting_functions import plot_posterior, plot_network
 import matplotlib.pyplot as plt
 
 # Sampling
@@ -17,6 +19,7 @@ import jax.numpy as jnp
 import jax.scipy.stats as jstats
 import blackjax as bjx
 import blackjax.smc.resampling as resampling
+
 # Typing
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
@@ -25,11 +28,11 @@ from blackjax.mcmc.rmh import RMHState
 from blackjax.smc.tempered import TemperedSMCState
 from blackjax.smc.base import SMCInfo
 from typing import Callable, Tuple
-from pprint import pprint
 
 # Keep this here in case you somehow import the file and need these constants??
-mu = [0., 0.]
+mu = [0., 0.] 
 eps = 1e-6
+obs_eps = 1e-12
 sigma = 1.
 mu_sigma = 0.
 sigma_sigma = 1.
@@ -40,7 +43,8 @@ sn = 25
 n_particles = 1_000
 n_mcmc_steps = 100
 rmh_sigma = 1e-2
-data_filename = 'processed_data.pkl'
+bookstein_dist = 0.3
+base_data_filename = 'processed_data'
 task_filename = 'task_list.txt'
 base_output_folder = 'Embeddings'
 make_plot = False
@@ -57,6 +61,7 @@ gpu = ''
 if __name__ == "__main__":
     # Create cmd argument list (arg_name, var_name, type, default, nargs[OPT])
     arguments = [('-e', 'eps', float, eps),  # d->d_max offset
+                 ('-obseps', 'obs_eps', float, obs_eps), # observation clipping offset
                  ('-m', 'mu', float, mu, '+'),  # mean of distribution to sample z
                  ('-s', 'sigma', float, sigma),  # std of distribution to sample z
                  ('-ms', 'mu_sigma', float, mu_sigma),  # mean of distribution to sample sigma_T
@@ -68,7 +73,8 @@ if __name__ == "__main__":
                  ('-np', 'n_particles', int, n_particles),  # number of smc particles
                  ('-nm', 'n_mcmc_steps', int, n_mcmc_steps),  # number of mcmc steps within smc
                  ('-r', 'rmh_sigma', float, rmh_sigma), # sigma of the RMH sampler within SMC
-                 ('-df', 'data_filename', str, data_filename),  # filename of the saved data
+                 ('-bdist', 'bookstein_dist', float, bookstein_dist), # distance the bookstein coordinates are
+                 ('-df', 'base_data_filename', str, base_data_filename),  # filename of the saved data
                  ('-tf', 'task_filename', str, task_filename), # filename of the list of task names
                  ('-of', 'base_output_folder', str, base_output_folder), # folder where to dump the LSM embeddings
                  ('--plot', 'make_plot', bool), # whether to create a plot
@@ -76,6 +82,8 @@ if __name__ == "__main__":
                  ('-lab', 'label_location', str, label_location), # file location of the labels
                  ('--print', 'do_print', bool), # whether to print cute info
                  ('--stats', 'save_stats', bool), # whether to save the statistics in a csv
+                 ('--partial', 'partial', bool), # whether to use partial correlations
+                 ('--bpf', 'bpf', bool), # whether to use band-pass filtered rs-fMRI data
                  ('-stf', 'stats_filename', str, stats_filename),  # statistics filename
                  ('-stfl', 'stats_folder', str, stats_folder),  # statistics folder
                  ('-dl', 'dl', str, dl),  # save stats delimeter
@@ -86,6 +94,7 @@ if __name__ == "__main__":
     # Get arguments from CMD
     global_params = get_cmd_params(arguments)
     eps = global_params['eps']
+    obs_eps = global_params['obs_eps']
     mu = global_params['mu']
     sigma = global_params['sigma']
     mu_sigma = global_params['mu_sigma']
@@ -98,7 +107,8 @@ if __name__ == "__main__":
     n_particles = global_params['n_particles']
     n_mcmc_steps = global_params['n_mcmc_steps']
     rmh_sigma = global_params['rmh_sigma']
-    data_filename = global_params['data_filename']
+    bookstein_dist = global_params['bookstein_dist']
+    base_data_filename = global_params['base_data_filename']
     task_filename = global_params['task_filename']
     output_folder = global_params['base_output_folder']+f'/{n_particles}p{n_mcmc_steps}s'
     make_plot = global_params['make_plot']
@@ -106,6 +116,8 @@ if __name__ == "__main__":
     label_location = global_params['label_location']
     do_print = global_params['do_print']
     save_stats = global_params['save_stats']
+    partial = global_params['partial']
+    bpf = global_params['bpf']
     stats_filename = f"{global_params['stats_folder']}/{global_params['stats_filename']}"
     dl = global_params['dl']
     key = global_params['key']
@@ -136,18 +148,20 @@ def get_default_params() -> dict:
 def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps) -> ArrayLike:
     """
     Calculates all deterministicly dependent parameters, up to and including the bound of sigma_beta, and returns those in a dictionary.
+    Assumes that _z follows a Wrapped Hyperbolic normal distribution (Nagano et al. 2019)
     PARAMS:
-    _z : 2D Gaussian, to be projected onto the hyperbolic plane
+    _z : pre-hyperbolic projection latent positions
     mu : mean of the wrapped hyperbolic normal prior
     eps : offset for calculating d_norm, to insure max(d_norm) < 1
     """
+    mu = jnp.array(mu)
     N, D = _z.shape
     triu_indices = jnp.triu_indices(N, k=1)
 
     mu_0 = jnp.zeros((N, D+1))
     mu_0 = mu_0.at[:,0].set(1)
     
-    # Mu can be a value (e.g. 0) to indicate (0,0), or a list (e.g. [0,0])
+    # Mu can be a value (e.g. 0) to indicate (0,0), or array-like (e.g. [0,0])
     if hasattr(mu, "__len__"):
         assert len(mu) == D, 'Dimension of mu must correspond to the dimension of each point in _z'
         mu_tilde = jnp.reshape(jnp.tile(mu, N), (N,D))
@@ -178,6 +192,7 @@ def get_ab(mu_beta:ArrayLike, sigma_beta:float, eps:float=eps) -> tuple:
     PARAMS:
     mu_beta : mean of the beta distribution
     sigma_beta : standard deviations of the beta distribution
+    eps : offset for calculating kappa, to insure 0 < kappa < 1
     """
     _kappa = mu_beta*(1-mu_beta)/(jnp.maximum(sigma_beta**2,eps)) - 1
     kappa = jnp.clip(_kappa, eps, 1-eps)
@@ -265,37 +280,38 @@ def bookstein_log_prior(_z:ArrayLike, sigma_beta_T:float, sigma:float=sigma, mu_
     pivot_point_logprior = jnp.log(2)+jstats.norm.logpdf(_z[0,:], loc=0., scale=sigma).sum() + np.NINF*(_z[0,1] < 0.) # log[2*N(_z[2]|mu,sigma)] if _z[2] >= 0 else -INF.
     return rest_logprior+pivot_point_logprior
 
-def log_likelihood(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, eps:float=eps, idx=-1) -> float:
+def log_likelihood(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, obs_eps:float=obs_eps) -> float:
     """
     Returns the log-likelihood
     PARAMS:
     _z : x,y coordinates of the positions
     sigma_beta_T : transformed standard deviations of the beta distribution
     obs : observed correlations (samples x edges)
-    eps : offset for calculating d_norm, to insure max(d_norm) < 1
+    obs_eps : offset for clipping the observations, to insure 0 < correlations < 1
     """
     params = get_det_params(_z, eps=eps)
     mu_beta, bound = params['mu_beta'], params['bound']
     sigma_beta = invlogit(sigma_beta_T)*bound # Transform sigma_beta back to [0, bound] to get a,b
     a,b = get_ab(mu_beta, sigma_beta)
-    logprob_A = jstats.beta.logpdf(obs, a, b)
+    obs_clip = jnp.clip(obs, obs_eps, 1-obs_eps)
+    logprob_A = jstats.beta.logpdf(obs_clip, a, b)
     return logprob_A.sum()
 
-def bookstein_log_likelihood(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, eps:float=eps, idx=-1) -> float:
+def bookstein_log_likelihood(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, bookstein_dist:float=bookstein_dist) -> float:
     """
-    Returns the log-likelihood
+    Returns the log-likelihood given that _z is missing its Bookstein anchors
     PARAMS:
     _z : x,y coordinates of the positions
     sigma_beta_T : transformed standard deviations of the beta distribution
     obs : observed correlations (samples x edges)
-    eps : offset for calculating d_norm, to insure max(d_norm) < 1
+    bookstein_dist : distance between the Bookstein anchors (in the x-direction)
     """
     n_dims = _z.shape[1]
-    bookstein_target = get_bookstein_target(n_dims)
+    bookstein_anchors = get_bookstein_anchors(n_dims, bookstein_dist)
 
-    # Concatenate bookstein targets to _z
-    _zc = jnp.concatenate([bookstein_target, _z])
-    return log_likelihood(_zc, sigma_beta_T, obs, idx=idx)
+    # Concatenate bookstein anchors to _z
+    _zc = jnp.concatenate([bookstein_anchors, _z])
+    return log_likelihood(_zc, sigma_beta_T, obs)
 
 def log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, mu:ArrayLike=mu, sigma:float=sigma, eps:float=eps) -> float:
     """
@@ -412,12 +428,12 @@ if __name__ == "__main__":
     """
     
     # Load plt labels here to avoid opening in a loop
-    if make_plot:
-        label_data = np.load(label_location)
-        plt_labels = label_data[label_data.files[0]]
+    # if make_plot:
+    #     label_data = np.load(label_location)
+    #     plt_labels = label_data[label_data.files[0]]
 
-    obs, tasks = load_observations(data_filename, task_filename, subject1, subjectn, M) 
-
+    data_filename = get_filename_with_ext(base_data_filename, partial, bpf)
+    obs, tasks, encs = load_observations(data_filename, task_filename, subject1, subjectn, M)
     for si, n_sub in enumerate(range(subject1, subjectn+1)):
         for ti, task in enumerate(tasks):
             # Create LS embedding
@@ -434,21 +450,26 @@ if __name__ == "__main__":
                 with open(stats_filename, 'a', newline='') as f:
                     writer = csv.writer(f, delimiter=dl)
                     writer.writerow(stats_row)
+                    
+            partial_txt = '_partial' if partial else ''
+            base_save_filename = f'con_hyp_S{n_sub}_{task}_embedding{partial_txt}'
 
             if make_plot:
                 last__z_positions = smc_embedding.particles['_z']
                 z_positions = lorentz_to_poincare(get_attribute_from_trace(last__z_positions, get_det_params, 'z', shape=(n_particles, N, D+1)))
 
-                ## ADD LABELS!
+                ## TODO: ADD LABELS!
                 # Plot posterior
                 plt.figure()
                 ax = plt.gca()
+                threshold = 0.1 if partial else 0.4
                 plot_posterior(z_positions,
                                edges=obs[si, ti, 0],
-                               # pos_labels=None,
+                               pos_labels=None,
                                ax=ax,
                                hyperbolic=True,
-                               bkst=True)
+                               bkst=True,
+                               threshold=threshold)
                 poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
                 ax.add_patch(poincare_disk)
                 plt.title(f'Proposal S{n_sub} {task}')
@@ -456,17 +477,17 @@ if __name__ == "__main__":
                 fig_output_folder = f'{figure_folder}/{n_particles}p{n_mcmc_steps}s'
                 if not os.path.exists(fig_output_folder): # Create folder if it does not yet exist
                     os.makedirs(fig_output_folder)
-                savefile = f'./{fig_output_folder}/con_hyp_S{n_sub}_{task}.png'
+                savefile = f'./{fig_output_folder}/{base_save_filename}.png'
                 plt.savefig(savefile)
                 plt.close()
 
             # Save data
-            embedding_filename = f'./{output_folder}/con_hyp_S{n_sub}_{task}_embedding.pkl'
+            embedding_filename = f'./{output_folder}/{base_save_filename}.pkl'
             info_filename = f'./{output_folder}/con_hyp_S{n_sub}.txt'
             with open(embedding_filename, 'wb') as f:
                 pickle.dump(smc_embedding, f)
             with open(info_filename, 'a') as f:
-                info_string = 'Task {} took {:.4f}sec ({} iterations) with lml={:.4f}\n'.format(task, end_time - start_time, n_iter, jnp.sum(lml))
+                info_string = f'Task {task} took {end_time-start_time:.4f}sec ({n_iter} iterations) with lml={jnp.sum(lml):.4f}\n'
                 f.write(info_string)
 
         # Add an empty line between each subject in the info file

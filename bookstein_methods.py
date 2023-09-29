@@ -9,19 +9,20 @@ from blackjax.smc.tempered import TemperedSMCState
 from blackjax.mcmc.rmh import RMHState
 from typing import Callable
 
-def get_bookstein_target(n_dims:int = 2, offset:float=0.3) -> jnp.ndarray:
+def get_bookstein_anchors(n_dims:int = 2, offset:float=0.3) -> jnp.ndarray:
     """
-    Returns the bookstein coordinate target for the first two positions, in n_dims dimensions
+    Returns the bookstein coordinate anchors for the first two positions, in n_dims dimensions
     PARAMS:
     n_dims : number of dimensions of the latent space
-    offset : offset on the x-axis that the Bookstein targets are put. Node 1 is put on (-offset, 0), node 2 on (offset, 0).
+    offset : offset on the x-axis that the Bookstein anchors are put. Node 1 is put on (-offset, 0), node 2 on (offset, 0).
     """
-    assert offset > 0., 'Offset must be bigger than 0 but is {}'.format(offset)
-    bookstein_target = jnp.zeros(shape=(n_dims, n_dims)) # for each dimension you need one bookstein coordinate
-    bookstein_target = bookstein_target.at[0,0].set(-offset) # First position is negative
+    assert n_dims > 1, f"Bookstein anchors must be used in a latent space with more than 1 dim, but is being used in a {n_dims} dimensional LS"
+    assert offset > 0., f"Offset must be bigger than 0 but is {offset}"
+    bookstein_anchors = jnp.zeros(shape=(n_dims, n_dims)) # for each dimension you need one bookstein coordinate
+    bookstein_anchors = bookstein_anchors.at[0,0].set(-offset) # First position is negative
     for n in range(1,n_dims):
-        bookstein_target = bookstein_target.at[n,0].set(offset)
-    return bookstein_target
+        bookstein_anchors = bookstein_anchors.at[n,0].set(offset) # Dit klopt nog niet maar het gaat nooit uitmaken
+    return bookstein_anchors
 
 def bookstein_position(_z:ArrayLike) -> ArrayLike:
     """
