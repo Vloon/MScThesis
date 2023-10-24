@@ -26,7 +26,7 @@ from blackjax.mcmc.rmh import RMHState
 from matplotlib import axes as Axes # I want types to be capitalized for some reason.
 from typing import Callable, Tuple
 
-## Parser
+## OS stuff
 def set_GPU(gpu:str = '') -> None:
     """
     Sets the GPU safely in os.environ
@@ -42,7 +42,6 @@ def get_cmd_params(parameter_list:list) -> dict:
     Gets the parameters described in parameter_list from the command line.
     PARAMS:
     parameter_list : list of tuples containing (arg_name <str>, dest <str>, type <type>, default <any>, nargs <str> [OPTIONAL])
-    default_parameters : the default parameters when not all parameters are given in the command line
 
     Example of parameter list:
         [('-m', 'mu', float, [1.,0.] '+'),
@@ -85,6 +84,14 @@ def get_filename_with_ext(base_filename:str, partial:bool=False, bpf:bool=False,
     partial_txt = '_partial' if partial else ''
     bpf_txt = '_bpf' if bpf else ''
     return f'{folder}/{base_filename}{partial_txt}{bpf_txt}.{ext}'
+
+def get_safe_folder(folder:str) -> str:
+    """
+    Creates a folder if it did not yet exists along the path given, and returns it.
+    """
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+    return folder
 
 ## Data stuff
 def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
@@ -137,6 +144,9 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
                 obs[si, ti, ei, :] = observed_values
     return obs, tasks, encs
 
+def obs_matrix_to_dict(): ### lijkt me een goed idee? 
+    pass
+
 def node_pos_dict2array(pos_dict:dict) -> np.ndarray:
     """
     Puts the dictionary latent positions {node: position} into an (n,D) array
@@ -163,18 +173,25 @@ def triu2mat(v:ArrayLike) -> ArrayLike:
     mat[triu_indices] = v
     return mat + mat.T
 
-def get_trace_correlation(sampled_d:ArrayLike, ground_truth_d:ArrayLike) -> jnp.ndarray:
+def get_trace_correlation(sampled_d:ArrayLike, ground_truth_d:ArrayLike, make_np:bool=False) -> ArrayLike:
     """
     Gets the correlations between the distances in the sampled positions and the ground truth.
     PARAMS:
-    sampled_d : the sampled distance matrices
-    ground_truth_d : the ground truth distance matrix
+    sampled_d : the sampled distance matrices (n_samples, N, N) or (n_samples, M)
+    ground_truth_d : the ground truth distance matrix (N, N) or (M)
+    make_np : whether to convert the correlation trace to numpy (true) or leave as jax.numpy (false) array
     """
-    N = sampled_d.shape[1]
+    if len(sampled_d.shape) == 3:
+        N = sampled_d.shape[1]
+        d_idc = triu_indices
+    elif len(sampled_d.shape) == 2:
+        M = sampled_d.shape[1]
+        N = int((1 + np.sqrt(1 + 8 * M))/2)
+        d_idc = np.arange(M)
     triu_indices = np.triu_indices(N, k=1)
-    gt_d_triu = ground_truth_d[triu_indices]
-    get_corr = lambda carry, d: (None, jnp.corrcoef(gt_d_triu, d[triu_indices])[0,1])
-
+    if len(ground_truth_d.shape) == 2:  # NxN
+        ground_truth_d = ground_truth_d[triu_indices]
+    get_corr = lambda carry, d: (None, jnp.corrcoef(ground_truth_d, d[d_idc])[0, 1])
     _, corrs = jax.lax.scan(get_corr, None, sampled_d)
     return corrs
 
@@ -186,7 +203,7 @@ def get_attribute_from_trace(LSM_embeddings:ArrayLike, get_det_params:Callable, 
     get_det_params : function to get the deterministic parameters according to the correct model
     attributes : dictionary key corresponding to the desired attribute
     shape : shape of the output, T x n_particles x "shape of attribute for 1 particle"
-    param_kwargs : parameters for the get_det_params function (e.g. 'mu' = [0.,0.])
+    param_kwargs : parameters for the get_det_params function (e.g. {'mu' = [0.,0.]})
     """
     if len(LSM_embeddings.shape) == 4:
         T, n_particles, N, _ = LSM_embeddings.shape
@@ -229,6 +246,18 @@ def invlogit(x:ArrayLike) -> ArrayLike:
     """
     return 1 / (1 + jnp.exp(-x))
 
+## Euclidean math
+def euclidean_distance(z:ArrayLike) -> jnp.ndarray:
+    """
+    Returns the Euclidean distance between all elements in z, calculated via the Gram matrix.
+    PARAMS:
+    z : NxD latent positions
+    """
+    G = jnp.dot(z, z.T)
+    g = jnp.diag(G)
+    ones = jnp.ones_like(g)
+    return jnp.sqrt(jnp.outer(ones, g) + jnp.outer(g, ones) - 2 * G)
+
 ## Hyperbolic math
 def lorentz_to_poincare(networks:ArrayLike) -> np.ndarray:
     """
@@ -270,7 +299,7 @@ def lorentzian(v:ArrayLike, u:ArrayLike, keepdims:bool=False) -> jnp.ndarray:
     signs = signs.at[:,0].set(-1)
     return jnp.sum(v*u*signs, axis=1, keepdims=keepdims)
 
-def lorentz_distance(z:ArrayLike) -> jnp.ndarray: #
+def lorentz_distance(z:ArrayLike) -> jnp.ndarray:
     """
     Returns the hyperbolic distance between all N points in z as a N x N matrix
     PARAMS:

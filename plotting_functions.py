@@ -261,10 +261,12 @@ def plot_posterior(pos_trace:ArrayLike,
                    continuous:bool=False,
                    bkst:bool=False,
                    threshold:float=0.1,
+                   max_th_digits:int=4,
                    margin:float=0.1,
                    s:float=0.5,
-                   alpha_margin:float=0.005,
-                   hemisphere_symbols:list=['s', '^']) -> Axes:
+                   alpha_margin:float=5e-3,
+                   marker_width:float=0.5,
+                   hemisphere_symbols:ArrayLike=['s', '^']) -> Axes:
     """
     Plots a network with the given positions.
     PARAMS:
@@ -279,9 +281,12 @@ def plot_posterior(pos_trace:ArrayLike,
     continuous : whether the edge weights are continuous or binary
     bkst : whether to deal with the first two nodes as Bookstein nodes
     threshold : minimum edge weight for the edge to be plotted
+    max_th_digits : maximum number of digits to show in the title for the threshold
     margin : percentage of disk radius to be added as whitespace
     s : point size for the scatter plot
     alpha_margin : transparancy margin to ensure the most variable position does not have alpha=0.
+    marker_width : the width of the border around the marker
+    hemisphere_symbols : list of plt marker symbols used for the different hemispheres
     """
     pos_trace = np.array(pos_trace) # Convert to Numpy, probably from JAX.Numpy
     n_steps, N, D = pos_trace.shape
@@ -306,7 +311,7 @@ def plot_posterior(pos_trace:ArrayLike,
     # BOTTOM: Add edges
     if not edges is None:
         if hyperbolic:
-            if bkst:  # Add jitter to Bookstein coordinates for plottability
+            if bkst:  # Add small jitter to Bookstein coordinates for plottability
                 pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
             ax = plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
         else:
@@ -326,18 +331,17 @@ def plot_posterior(pos_trace:ArrayLike,
         unique_regions = np.unique(brain_region)
         assert len(unique_hemis) == len(hemisphere_symbols), f'Length of hemisphere_symbols should match unique number of hemispheres but they are {len(hemisphere_symbols)} and {len(unique_hemis)} respectively.'
         for i, hs in enumerate(unique_hemis):
-            plt.scatter(0, 0, c='k', marker=hemisphere_symbols[i], label=hs, alpha=1) # Plot one invisible point per marker for plotting
+            ax.scatter(0, 0, c='k', marker=hemisphere_symbols[i], label=hs, linewidth=.5, alpha=0) # Plot one invisible point per marker for plotting
         for j, br in enumerate(unique_regions):
-            plt.scatter(0, 0, marker='.', markeredgecolor='k', label=br, alpha=1)  # Plot one invisible point per color for plotting
-        plt.legend(ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5))
+            ax.scatter(0, 0, marker='.', edgecolor='k', label=br, alpha=0)  # Plot one invisible point per color for plotting
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5)
         # Now plot the actual data without labels
         for i, hs in enumerate(unique_hemis):
             for j, br in enumerate(brain_region):
-                plt.scatter(x=pos_mean[:,0],
+                ax.scatter(x=pos_mean[:,0],
                             y=pos_mean[:,1],
                             s=s,
-                            marker=hemisphere_symbols[i],
-                            color='k')
+                            marker=hemisphere_symbols[i])
     else: # Just plot the positions as default
         if bkst:  # Make bookstein coordinates red
             ax.scatter(pos_mean[:2, 0], pos_mean[:2, 1], c='r', s=s)
@@ -347,13 +351,13 @@ def plot_posterior(pos_trace:ArrayLike,
 
     if title: # Both None and empty string will be False
         if threshold > 0:
-            title = f"{title}\nthreshold = {threshold:.2f}"
+            thr_tit = round(threshold, max_th_digits) if len(str(threshold)) > max_th_digits else threshold
+            title = f"{title}\nthreshold = {thr_tit}"
         ax.set_title(title, color='k', fontsize='24')
     margin = 1+margin
     ax.set(xlim=(-margin*disk_radius,margin*disk_radius),ylim=(-margin*disk_radius,margin*disk_radius))
     ax.axis('off')
-    if not clean_ax:
-        plt.tight_layout()
+    plt.tight_layout()
     return ax
 
 def plot_log_marginal_likelihoods(lml:ArrayLike, n_particles:ArrayLike, n_mcmc_steps:ArrayLike, ax:Axes=None):
@@ -515,7 +519,7 @@ def plot_correlations(corr:ArrayLike,
     add_colorbar : whether to add a colorbar as legend-ish thing
     """
     corr = np.array(corr)
-    assert len(corr.shape) in [1,2], f'corr must have 1 or 2 dimensions, but as {len(corr.shape)}'
+    assert len(corr.shape) in [1,2], f'corr must have 1 or 2 dimensions, but has {len(corr.shape)}'
     if len(corr.shape) == 1:
         corr = triu2mat(corr)
     if ax is None:
@@ -526,37 +530,5 @@ def plot_correlations(corr:ArrayLike,
 
     if add_colorbar:
         ax.figure.colorbar(im, ax=ax)
-
-    return ax
-
-def plot_distance_vs_correlations(dist:ArrayLike,
-                                  corr:ArrayLike,
-                                  ax:Axes=None,
-                                  s:float=0.5,
-                                  color:str='k') -> Axes:
-    """
-    Plots the distance matrix against the correlations
-    PARAMS:
-
-    """
-    assert len(dist.shape) == 2 or len(dist.shape) == 1, f"Distance matrix must be matrix or upper triangle, but has {len(dist.shape)} dimensions"
-    assert len(corr.shape) == 2 or len(corr.shape) == 1, f"Correlation matrix must be matrix or upper triangle, but has {len(corr.shape)} dimensions"
-    dist = np.array(dist)
-    corr = np.array(corr)
-    if len(dist.shape) == 2:
-        N = len(dist)
-        dist = dist[np.triu_indices(N, k=1)]
-    if len(corr.shape) == 2:
-        N = len(corr)
-        corr = corr[np.triu_indices(N, k=1)]
-    assert len(corr) == len(dist), f"Distance matrix and correlation matrix must be same size but dist has shape {dist.shape} and corr has shape {corr.shape}"
-    if ax is None:
-        plt.figure()
-        ax = plt.gca()
-
-    ax.scatter(dist, corr, s=s, c=color)
-    ax.set_xlabel('Distance (normalized)')
-    ax.set_ylabel('Correlation')
-    ax.set_ylim(0,1)
 
     return ax

@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import jax.numpy as jnp
 import jax.scipy.stats as jstats
@@ -6,6 +8,8 @@ import matplotlib.pyplot as plt
 import pickle
 
 from continuous_hyperbolic_LSM import sample_observation
+from helper_functions import get_cmd_params, set_GPU, open_taskfile, get_safe_folder
+from plotting_functions import plot_correlations
 
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
@@ -14,38 +18,42 @@ from typing import Callable, Tuple
 arguments = [('-df', 'base_data_filename', str, 'clustered_data'),  # the most basic version of the filename of the saved data
              ('-of', 'output_folder', str, 'Data/cluster_sim'), # folder where to dump data
              ('-fof', 'figure_output_folder', str, 'Figures/cluster_sim'), # folder where to dump figures
+             ('-tf', 'task_filename', str, 'task_list.txt'), # filename of the list of task names
+             ('-s1', 'subject1', int, 1),  # first subject to be used
+             ('-sn', 'subjectn', int, 5),  # last subject to be used
              ('-nc', 'n_clusters', int, 5), # number of clusters
              ('-mcd', 'min_cluster_dist', float, 3.), # minimum distance between the clusters
              ('-alpha', 'alpha', float, 3.), # shape parameter of the gamma distribution to sample cluster means
              ('-theta', 'theta', float, 1.), # scale parameter of the gamma distribution to sample cluster means
              ('-sigmus', 'sigma_mus', float, 1.), # standard deviation for the cluster's normal distribution
-             ('-sbt', 'sigma_beta_T', float, 1.), # standard deviation 
-             ('-ngts', 'n_ground_truths', int, 5), # number of ground truths to sample
-             ('-nobs', 'n_observations', int, 2), # number of observations per ground truth
+             ('-sbt', 'sigma_beta_T', float, 0.), # logit transformed standard deviation of the beta distribution
              ('-N', 'N', int, 164), # number of nodes
              ('-D', 'D', int, 2), # dimensionality of the latent space
              ('-seed', 'seed', int, 0), # PRNGKey seed
              ('--plot', 'make_plot', bool), # whether to make a plot
+             ('-cm', 'cmap', str, 'bwr'), # colormap
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
 global_params = get_cmd_params(arguments)
 base_data_filename = global_params['base_data_filename']
-output_folder = global_params['output_folder']
-figure_output_folder = global_params['figure_output_folder']
+N = global_params['N']
+output_folder = get_safe_folder(f"{global_params['output_folder']}/{N}")
+figure_output_folder = get_safe_folder(f"{global_params['figure_output_folder']}/{N}")
+task_filename = global_params['task_filename']
+subject1 = global_params['subject1']
+subjectn = global_params['subjectn']
 n_clusters = global_params['n_clusters']
 min_cluster_dist = global_params['min_cluster_dist']
 alpha = global_params['alpha']
 theta = global_params['theta']
 sigma_mus = global_params['sigma_mus']
 sigma_beta_T = global_params['sigma_beta_T']
-n_ground_truths = global_params['n_ground_truths']
-n_observations = global_params['n_observations']
-N = global_params['N']
 M = N*(N-1)//2
 D = global_params['D']
 seed = global_params['seed']
 make_plot = global_params['make_plot']
+cmap = global_params['cmap']
 set_GPU(global_params['gpu'])
 
 key = jax.random.PRNGKey(seed)
@@ -118,31 +126,57 @@ def get_clustered_latent_positions(key:PRNGKeyArray, mus:ArrayLike, sigmas:Array
 sigmas = jnp.array([sigma_mus]*n_clusters)
 N_per_cluster = divide_nodes()
 
-for gti in range(n_ground_truths):
-    # Create latent positions
-    key, mus = get_mus(key)
-    key, _z = get_clustered_latent_positions(key, mus, sigmas, N_per_cluster)
+tasks, encs = open_taskfile(task_filename)
+obs = {}
 
-    if make_plot:
-        plt.figure(figsize=(6,6))
-        plt.scatter(mus[:,0], mus[:,1], c='r', label=u'cluster $\mu$')
-        plt.scatter(_z[:,0], _z[:,1], c='k', s=1, label=u'\u200c_z') # Add zero width unicode character, labels that start with underscores are ignored in plt.legend.
-        plt.legend()
-        plt.title(f"Ground truth {gti} with {n_clusters} clusters")
-        savetitle = f"{figure_output_folder}/ground_truth_{gti}_with_{n_clusters}_clusters.png"
-        plt.savefig(savetitle)
-        plt.close()
+for si, n_sub in enumerate(range(subject1, subjectn+1)):
+    for ti, task in enumerate(tasks):
+        # Create latent positions
+        key, mus = get_mus(key)
+        key, _z = get_clustered_latent_positions(key, mus, sigmas, N_per_cluster)
 
-    # Save ground truth
-    ground_truth = {'_z': _z, 'sigma_beta_T': sigma_beta_T}
-    ground_truth_filename = f"{output_folder}/ground_truth_{gti}.pkl"
-    with open(ground_truth_filename, 'wb') as f:
-        pickle.dump(ground_truth, f)
+        if make_plot:
+            plt.figure(figsize=(6, 6))
+            plt.scatter(mus[:, 0], mus[:, 1], c='r', label=u'cluster $\mu$')
+            plt.scatter(_z[:, 0], _z[:, 1], c='k', s=1,
+                        label=u'\u200c_z')  # Add zero width unicode character, labels that start with underscores are ignored in plt.legend.
+            plt.legend()
+            plt.title(f"Ground truth for S{n_sub}_{task} with {n_clusters} clusters")
+            plt.tight_layout()
+            savetitle = f"{figure_output_folder}/gt_S{n_sub}_{task}_{n_clusters}_clusters.png"
+            plt.savefig(savetitle)
+            plt.close()
+            
+        # Save ground truth
+        ground_truth = {'_z': _z, 'sigma_beta_T': sigma_beta_T}
+        ground_truth_filename = f"{output_folder}/gt_S{n_sub}_{task}.pkl"
+        with open(ground_truth_filename, 'wb') as f:
+            pickle.dump(ground_truth, f)
 
-    # THIS MIGHT BE WEIRD, BECAUSE SAMPLE_OBSERVATIONS CALLS get_det_params WHICH ASSUMES A SINGLE NORMAL DISTRIBUTION I THINK? BUT IDK IT MIGHT WORK STILL?
-    key, obs = sample_observation(key, ground_truth, n_observations) # n_samples x M
-    observations_filename = f"{output_folder}/gt_{gti}_sample_{n_observations}_observations"
-    with open(observations_filename, 'wb') as f:
-        pickle.dump(obs, f)
+        for ei, enc in enumerate(encs): # Do it this way to use the right dictionary keys
+            # THIS MIGHT BE WEIRD, BECAUSE SAMPLE_OBSERVATIONS CALLS get_det_params WHICH ASSUMES _z WAS DRAWN FROM A SINGLE NORMAL DISTRIBUTION I THINK?
+            # But because we use mu=0 (default), we don't actually do anything with _z because we're not parallel transporting, we're really only exponential wrapping.
+            key, A = sample_observation(key, ground_truth) # key, 1 x M
+            A = A[0] # 1 x M --> M
+            obs[f"S{n_sub}_{task}_{enc}"] = A
+
+            # Plot correlations
+            if make_plot:
+                vmax = np.max(np.abs(A))
+                vmin = -vmax
+                plt.figure(figsize=(6, 6))
+                ax = plt.gca()
+                ax = plot_correlations(A, ax, cmap=cmap, add_colorbar=True, vmin=vmin, vmax=vmax)
+                plt.title(f"S{n_sub} {task} {enc}")
+                plt.xlabel('Node index')
+                plt.ylabel('Node index')
+                plt.tight_layout()
+                plt.savefig(f"{figure_output_folder}/S{n_sub}_{task}_{enc}_corr.png")
+                plt.close()
+
+# Save observations
+observations_filename = f"{output_folder}/clustered_sim_observations.pkl"
+with open(observations_filename, 'wb') as f:
+    pickle.dump(obs, f)
 
     

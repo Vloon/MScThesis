@@ -7,7 +7,7 @@ from jax._src.typing import ArrayLike
 from blackjax.types import PyTree
 from blackjax.smc.tempered import TemperedSMCState
 from blackjax.mcmc.rmh import RMHState
-from typing import Callable
+from typing import Callable, Union
 
 def get_bookstein_anchors(n_dims:int = 2, offset:float=0.3) -> jnp.ndarray:
     """
@@ -17,7 +17,7 @@ def get_bookstein_anchors(n_dims:int = 2, offset:float=0.3) -> jnp.ndarray:
     offset : offset on the x-axis that the Bookstein anchors are put. Node 1 is put on (-offset, 0), node 2 on (offset, 0).
     """
     assert n_dims > 1, f"Bookstein anchors must be used in a latent space with more than 1 dim, but is being used in a {n_dims} dimensional LS"
-    assert offset > 0., f"Offset must be bigger than 0 but is {offset}"
+    assert offset > 0, f"Offset must be bigger than 0 but is {offset}"
     bookstein_anchors = jnp.zeros(shape=(n_dims, n_dims)) # for each dimension you need one bookstein coordinate
     bookstein_anchors = bookstein_anchors.at[0,0].set(-offset) # First position is negative
     for n in range(1,n_dims):
@@ -79,16 +79,16 @@ def smc_bookstein_position(position:ArrayLike) -> ArrayLike:
     position = position*x_flip*do_flip + position*(1-do_flip)
     return position
 
-def add_bkst_to_smc_trace(trace:TemperedSMCState, D:int=2, is_array:bool=False) -> TemperedSMCState:
+def add_bkst_to_smc_trace(trace:TemperedSMCState, bkst_dist:float, D:int=2, is_array:bool=False) -> Union[TemperedSMCState,ArrayLike]:
     """
     Adds the bookstein coordinates to the start of each position in the SMC trace.
     PARAMS:
-    trace : the smc trace, must have a field .particles with key '_z'
+    trace : the smc trace, must have a field .particles with key '_z' OR a (M x N x D) trace array
     D : number of latent space dimensions
     is_array : whether the trace is an (n_steps, N-D, D) array
     """
-    bkst_target = get_bookstein_target(D)
-    add_bkst = lambda c, s: (None, jnp.concatenate([bkst_target, s]))
+    bkst_anchors = get_bookstein_anchors(D, bkst_dist)
+    add_bkst = lambda c, s: (None, jnp.concatenate([bkst_anchors, s]))
     if is_array:
         _, trace = jax.lax.scan(add_bkst, None, trace)
     else:

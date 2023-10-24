@@ -13,10 +13,9 @@ import os
 # Create cmd argument list (arg_name, var_name, type, default, nargs[OPT])
 arguments = [('-s1', 'subject1', int, 1), # first subject
              ('-sn', 'subjectn', int, 100),  # last subject
-             ('-d', 'data_path', str, './Data'), # path to get to the data
-             ('-tf', 'task_file', str, 'task_list.txt'), # task list name
+             ('-df', 'data_folder', str, 'Data'), # path to get to the data
+             ('-tf', 'task_file', str, 'task_list'), # task list name
              ('-of', 'output_file', str, 'processed_data'), # filename to save the processed data WITHOUT EXTENTION
-             ('-lf', 'log_file', str, 'log.txt'), # name of the log file
              ('--partial', 'partial', bool), # whether to use partial correlations
              ('--bpf', 'bpf', bool), # whether to use the band-pass filtered data
              ('--print', 'do_print', bool), # whether to print cute info
@@ -28,10 +27,9 @@ global_params = get_cmd_params(arguments)
 subject1 = global_params['subject1']
 subjectn = global_params['subjectn']
 assert subject1 <= subjectn, f"Subject 1 must be smaller than subject n but they are {subject1} and {subjectn} respectively."
-data_path = global_params['data_path']
-task_file = global_params['task_file']
+data_folder = global_params['data_folder']
+task_file = get_filename_with_ext(global_params['task_file'], ext='txt', folder=data_folder)
 output_file = global_params['output_file']
-log_file = global_params['log_file']
 partial = global_params['partial']
 bpf = global_params['bpf']
 do_print = global_params['do_print']
@@ -65,16 +63,6 @@ def import_data(subjects:ArrayLike=[], tasks:ArrayLike=[], phase_enc:ArrayLike=[
                 # Delete files from disc again
                 os.remove(filename)
     return data
-
-def get_partial_filename(key:str) -> str:
-    """
-    Returns the properly formatted file name for partial correlations.
-    PARAMS:
-    key : the key of the dictionary used to store all timeseries data
-    """
-    partial_txt = '_partial' if partial else ''
-    bpf_txt = '_bpf' if bpf else ''
-    return f'{data_path}/{output_file}_{key}{partial_txt}{bpf_txt}.pkl'
 
 def partial_correlation(x:ArrayLike) -> ArrayLike:
     """
@@ -130,7 +118,8 @@ def save_corr(data:dict, partial:bool=partial) -> Tuple[bool, list]:
     all_good = True
     for key in data.keys():
         # Skip the ones that already exist
-        partial_filename = get_partial_filename(key)
+
+        partial_filename = get_filename_with_ext(f"{output_file}_{key}", partial=partial, bpf=bpf, folder=data_path)
         if not os.path.isfile(partial_filename):
             ts_data = data[key].T
             if is_valid(ts_data)[0]:
@@ -157,7 +146,7 @@ def all_partial_corrs_exist(data:dict) -> bool:
     PARAMS:
     data : dictionary with timeseries data as values
     """
-    return np.all([os.path.isfile(get_partial_filename(key)) for key in data.keys()])
+    return np.all([os.path.isfile(get_filename_with_ext(f"{output_file}_{key}", partial=partial, bpf=bpf, folder=data_path)) for key in data.keys()])
 
 def combine_partial_corrs(data:dict) -> None:
     """
@@ -167,7 +156,7 @@ def combine_partial_corrs(data:dict) -> None:
     """
     corr_data = {}
     for key in data.keys():
-        partial_filename = get_partial_filename(key)
+        partial_filename = get_filename_with_ext(f"{output_file}_{key}", partial=partial, bpf=bpf, folder=data_path)
         with open(partial_filename, 'rb') as f:
             corr_data[key] = pickle.load(f)
     output_file = get_big_dict_filename()

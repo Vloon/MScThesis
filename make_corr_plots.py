@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from plotting_functions import plot_correlations
 from helper_functions import load_observations, get_cmd_params, set_GPU, get_filename_with_ext
-from tqdm import tqdm
 
 arguments = [('-df', 'base_data_filename', str, 'processed_data'),  # the most basic version of the filename of the saved data
              ('-tf', 'task_filename', str, 'task_list.txt'), # filename of the list of task names
@@ -37,7 +36,7 @@ set_GPU(global_params['gpu'])
 data_filename = get_filename_with_ext(base_data_filename, partial, bpf)
 obs, tasks, encs = load_observations(data_filename, task_filename, subject1, subjectn, M)
 
-for si, n_sub in tqdm(enumerate(range(subject1, subjectn + 1))):
+for si, n_sub in enumerate(range(subject1, subjectn + 1)):
     for ti, task in enumerate(tasks):
         for ei, enc in enumerate(encs):
             plt.figure(figsize=(10,10))
