@@ -1,6 +1,6 @@
 # Home brew functions
-from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, \
-    get_attribute_from_trace, euclidean_distance
+from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, get_attribute_from_trace, lorentz_distance, \
+    lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map, is_valid
 from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace
 from plotting_functions import plot_posterior, plot_network
 
@@ -147,38 +147,52 @@ if __name__ == "__main__":
     mu = jnp.array(mu)
 
 ## Define functions to calculate the continuous hyperbolic parameters
-def get_det_params(z:ArrayLike, eps:float=eps, **kwargs) -> dict:
-    """ 
+def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps, **kwargs) -> dict:
+    """
     Calculates all parameters based on z, and returns those in a dictionary.
     PARAMS:
-    z : positions on the Euclidean plane 
+    _z : pre-hyperbolic projection latent positions
+    mu : mean of the wrapped hyperbolic normal prior, pre-hypebolic projection
     eps : offset for calculating d_norm, to insure max(d_norm) < 1
     **kwargs allows us to pass non-used parameters, which is handy when we want to allow other files to use the con hyp model but also others and allow this function to just catch the parameters it needs
-    """ 
-    N = z.shape[0]
+    """
+    N, D = _z.shape
     triu_indices = jnp.triu_indices(N, k=1)
 
-    d = euclidean_distance(z)[triu_indices]
-    # d_norm = d/(jnp.max(d)+eps)
+    mu_0 = jnp.zeros((N, D + 1))
+    mu_0 = mu_0.at[:, 0].set(1)
 
-    # p = 1-d_norm
+    # Mu can be a value (e.g. 0) to indicate (0,0), or array-like (e.g. [0,0])
+    if hasattr(mu, '__len__'):
+        mu = jnp.array(mu)
+        assert len(mu) == D, f"Dimension of mu (={len(mu)}) must correspond to the dimension of each point in _z (={D})"
+        mu_tilde = jnp.reshape(jnp.tile(mu, N), (N, D))
+    else:
+        mu_tilde = mu * jnp.ones_like(_z)
+
+    mu = hyp_pnt(mu_tilde)  # UGLY?! How else to get a proper mean in H? Just kinda.. guess a correct H coordinate?
+    v = jnp.concatenate([jnp.zeros((N, 1)), _z], axis=1)
+    u = parallel_transport(v, mu_0, mu)
+    z = exponential_map(mu, u)
+
+    d = lorentz_distance(z)[triu_indices]
+
     p = jnp.clip(jnp.exp(-d**2), eps, 1-eps)
 
-    params = {'z':z,
+    params = {'_z':_z,
+              'z': z,
               'd':d,
-              # 'd_norm':d_norm,
               'p':p}
     return params
 
 ## Sampling functions
-def sample_prior(key:PRNGKeyArray, shape:tuple, mu:float = mu, sigma:float = sigma, eps:float = eps, **kwargs) -> Tuple[PRNGKeyArray, dict]:
-    """ 
-    Samples a prior by taking a 2D normal distribution and solving for z on the hyperbolic plane. 
+def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float = sigma, eps:float = eps, **kwargs) -> Tuple[PRNGKeyArray, dict]:
+    """
+    Samples a prior by taking a 2D normal distribution and solving for z on the hyperbolic plane.
     Returns the prior parameters in a dictionary.
     PARAMS:
     key : Random key for JAX functions
     shape : shape of the prior positions
-    mu : mean of the 2D Gaussian to sample z
     sigma : standard deviation of the 2D Gaussian to sample p
     eps : offset for calculating d_norm, to insure max(d_norm) < 1
     """
@@ -187,8 +201,8 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, mu:float = mu, sigma:float = sig
     M = N * (N - 1) // 2
 
     # Sample positions and temp
-    key, z_key = jax.random.split(key, num=2)
-    prior = {'z': sigma * jax.random.normal(z_key, shape=shape) + mu}
+    key, _z_key, = jax.random.split(key)
+    prior = {'_z' : sigma * jax.random.normal(_z_key, shape=shape)} # Is always centered at 0
 
     return key, prior
 
@@ -197,17 +211,17 @@ def sample_observation(key:PRNGKeyArray, prior:dict, n_samples:int=1, eps:float=
     Generates an observation based on the prior
     PARAMS:
     key : Random key for JAX functions
-    prior : dictionary containing sampled variables from the prior ('z')
+    prior : dictionary containing sampled variables from the prior ('_z')
     n_samples : number of observations to sample
     eps : offset for the normalization of d, and clipping of A
     """
     # Get prior position and sigma
-    z = prior['z']
-    N = z.shape[0] 
+    _z = prior['_z']
+    N = _z.shape[0]
     M = N*(N-1)//2
 
     # Calculate p
-    params = get_det_params(z, eps=eps)
+    params = get_det_params(_z, eps=eps)
     p = params['p']
 
     # Sample A
@@ -217,41 +231,38 @@ def sample_observation(key:PRNGKeyArray, prior:dict, n_samples:int=1, eps:float=
     return key, Y
 
 ## Probability distributions
-def log_prior(z:ArrayLike, mu:float=mu, sigma:float=sigma) -> float:
+def log_prior(_z:ArrayLike, sigma:float=sigma) -> float:
     """
-    Returns the log-prior
+    Returns the log-prior for a full _z state and sigma state, no Bookstein faffing.
     PARAMS:
-    z : positions on the Euclidean plane
-    mu : mean of the 2D Gaussian to sample z
-    sigma : standard deviation of the 2D Gaussian to sample z
+    _z : pre-hyperbolic transformed positions
+    sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     """
-    logprob_z = jstats.norm.logpdf(z, loc=mu, scale=sigma).sum()
-    return logprob_z
+    logprob__z = jstats.norm.logpdf(_z, loc=0, scale=sigma).sum()
+    return logprob__z 
 
-def bookstein_log_prior(z:ArrayLike, zb_x:float, mu:float=mu, sigma:float=sigma, bookstein_dist:float=bookstein_dist) -> float:
+def bookstein_log_prior(_z:ArrayLike, _zb_x:float, sigma:float=sigma) -> float:
     """
-    Returns the log-prior for a network with bookstein coordinates
+    Returns the log-prior, taking into account Bookstein anchors.
     PARAMS:
-    z : positions on Euclidean plane
-    zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
-    mu : mean of the 2D Gaussian to sample z
-    sigma : standard deviation of the 2D Gaussian to sample z
-    bookstein_dist : offset of the first Bookstein anchor
+    _z : pre-hyperbolic transformed positions
+    _zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
+    sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     """
-    zb_x_logprior = jstats.truncnorm.logpdf(zb_x, a=0, b=jnp.inf, loc=-bookstein_dist, scale=sigma).sum() # Logprior for the node restricted in y = 0.
-    zb_y_logprior = jnp.log(2)+jstats.norm.logpdf(z[0,:], loc=mu, scale=sigma).sum() - jnp.inf*(z[0,1] < 0) # log[2*N(_z[2]|mu,sigma)] if _z[2] >= 0 else -INF.
-    rest_logprior = log_prior(z[1:,:], mu, sigma)
-    return rest_logprior + zb_x_logprior + zb_y_logprior
+    _zb_x_logprior = jstats.truncnorm.logpdf(_zb_x, a=0, b=jnp.inf, loc=-bookstein_dist, scale=sigma).sum() # Logprior for the node restricted in y = 0.
+    _zb_y_logprior = jnp.log(2)+jstats.norm.logpdf(_z[0,:], loc=0, scale=sigma).sum() - jnp.inf*(_z[0,1] < 0) # Logprior for the node restricted in y>0 # Kan dit niet ook met een truncnorm?
+    rest_logprior = log_prior(_z[1:,:], sigma) 
+    return rest_logprior + _zb_x_logprior + _zb_y_logprior
 
-def log_likelihood(z:ArrayLike, obs:ArrayLike, eps:float=eps) -> float:
+def log_likelihood(_z:ArrayLike, obs:ArrayLike, eps:float=eps) -> float:
     """
     Returns the log-likelihood
     PARAMS:
-    z : positions on the Euclidean plane
+    _z : pre-hyperbolic transformed positions
     obs : observed correlations (samples x edges)
     eps : offset for the normalization of d, and clipping of A
     """
-    params = get_det_params(z, eps=eps)
+    params = get_det_params(_z, eps=eps)
     p = params['p']
 
     logprob_Y = jstats.bernoulli.logpmf(obs, p).sum() # S x M obs --sum--> scalar logprob_A
@@ -269,68 +280,52 @@ def log_likelihood_from_dist(d:ArrayLike, obs:ArrayLike, eps:float=eps) -> float
     logprob_Y = jstats.bernoulli.logpmf(obs, p).sum()
     return logprob_Y
 
-def bookstein_log_likelihood(z:ArrayLike, zb_x:float, obs:ArrayLike, bookstein_dist:float=bookstein_dist, eps:float=eps) -> float:
+def bookstein_log_likelihood(_z:ArrayLike, _zb_x:float, obs:ArrayLike, bookstein_dist:float=bookstein_dist, eps:float=eps) -> float:
     """
     Returns the log-likelihood
     PARAMS:
-    z : positions on Euclidean plane (N x D)
-    zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
+    _z : x,y coordinates of the positions, without bookstein anchors
+    _zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
     obs : observed correlations (samples x edges)
-    bookstein_dist : offset of the first Bookstein anchor
+    bookstein_dist : x-offset of the first Bookstein anchor
     eps : offset for the normalization of d, and clipping of A
     """
-    n_dims = z.shape[1]
-    bookstein_anchors = get_bookstein_anchors(zb_x, n_dims, bookstein_dist)
+    n_dims = _z.shape[1]
+    bookstein_anchors = get_bookstein_anchors(_zb_x, n_dims, bookstein_dist)
 
-    # Concatenate bookstein targets to z
-    zc = jnp.concatenate([bookstein_anchors, z])
-    return log_likelihood(zc, obs, eps=eps)
+    # Concatenate bookstein anchors to _z
+    _zc = jnp.concatenate([bookstein_anchors, _z])
+    return log_likelihood(_zc, obs)
 
-def log_density(z:ArrayLike, obs:ArrayLike, mu:float=mu, sigma:float=sigma, eps:float=eps) -> float:
+def log_density(_z:ArrayLike, obs:ArrayLike, mu:float=mu, sigma:float=sigma, eps:float=eps) -> float:
     """
     Returns the log-probability density of the observed edge weights under the Continuous Hyperbolic LSM.
     PARAMS:
-    z : positions on Euclidean plane
+    _z : positions on Euclidean plane (pre hyperbolic projection)
     obs : observed correlations (samples x edges)
     mu : mean of the 2D Gaussian to sample _z
     sigma : standard deviation of the 2D Gaussian to sample _z
     eps : offset for the normalization of d, and clipping of A
     """
-    prior_prob = log_prior(z, mu, sigma)
-    likelihood_prob = log_likelihood(z, obs, eps=eps)
+    prior_prob = log_prior(_z, sigma)
+    likelihood_prob = log_likelihood(_z, obs, eps=eps)
     return prior_prob + likelihood_prob
 
 ## SMC + Bookstein methods
-def initialize_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, mu:float=mu, sigma:float=sigma) -> Tuple[PRNGKeyArray, dict]:
+def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, sigma:float=sigma, bookstein_dist:float=bookstein_dist) -> Tuple[PRNGKeyArray, dict]:
     """
-    Initializes the SMC particles. Equivalent to sample_prior, but with an extra dimension for the SMC particles.
+    Initializes the SMC particles, but with Bookstein coordinates.
     PARAMS:
-    key : Random key for JAX functions
+    key : random key for JAX functions
     num_particles : number of SMC particles
-    shape : shape of the latent space positions
-    mu : mean of the 2D Gaussian to sample p
-    sigma : standard deviation of the 2D Gaussian to sample p
-    """
-    z_key, key = jax.random.split(key)
-    initial_position = {'z': sigma*jax.random.normal(z_key, shape=(num_particles, N, D))+mu}
-    return key, initial_position
-
-def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, mu:float=mu, sigma:float=sigma, bookstein_dist:float=bookstein_dist) -> Tuple[PRNGKeyArray, dict]:
-    """
-    Initializes the SMC particles. Equivalent to sample_prior, but with an extra dimension for the SMC particles.
-    PARAMS:
-    key : Random key for JAX functions
-    num_particles : number of SMC particles
-    shape : shape of the latent space positions
-    mu : mean of the 2D Gaussian to sample p
-    sigma : standard deviation of the 2D Gaussian to sample p
+    shape : number of nodes by number of dimensions
+    sigma : std of the positions' 2D Gaussian
     bookstein_dist : offset of the first Bookstein anchor
     """
     N, D = shape
-    z_key, z_bx_key, key = jax.random.split(key, 3)
-    initial_position = {'z': smc_bookstein_position(sigma * jax.random.normal(z_key, shape=(num_particles, N - D, D)) + mu),
-                        'zb_x': sigma*jax.random.truncated_normal(z_bx_key, lower=-bookstein_dist, upper=jnp.inf, shape=(num_particles,1)), # Second node is restricted to just an x-position.
-                        } # N-D to skip first D bkst nodes (they are implicit)
+    key, _z_key, _z_bx_key = jax.random.split(key, 3)
+    initial_position = {'_z': smc_bookstein_position(sigma*jax.random.normal(_z_key, shape=(num_particles, N-D, D))), # N-D to skip first D bkst nodes. First node is rigid.
+                        '_zb_x': sigma*jax.random.truncated_normal(_z_bx_key, lower=-bookstein_dist, upper=jnp.inf, shape=(num_particles,1))} # Second node is restricted to just an x-position.
     return key, initial_position
 
 def smc_bkst_inference_loop(key:PRNGKeyArray, smc_kernel:Callable, initial_state:ArrayLike) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]:
@@ -361,7 +356,7 @@ def smc_bkst_inference_loop(key:PRNGKeyArray, smc_kernel:Callable, initial_state
 
     return key, n_iter, lml, final_state
 
-def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int = N, D:int = D, rmh_sigma:float = rmh_sigma, n_mcmc_steps:int = n_mcmc_steps, n_particles:int = n_particles) -> Tuple[PRNGKeyArray, float, TemperedSMCState]:
+def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sigma:float=rmh_sigma, n_mcmc_steps:int=n_mcmc_steps, n_particles:int=n_particles) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]:
     """
     Creates a latent space embedding based on the given observations.
     Returns key,
@@ -375,10 +370,10 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int = N, D:int = D, rmh
     n_particles : number of SMC particles
     """
     # Define smc+bkst sampler
-    _bookstein_log_prior = lambda state: bookstein_log_prior(**state)  # Parameters are taken from global parameters
-    _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs)  # Parameters are taken from global parameters
+    _bookstein_log_prior = lambda state: bookstein_log_prior(**state) # Parameters are taken from global parameters
+    _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs) # Parameters are taken from global parameters
 
-    rmh_parameters = {'sigma': rmh_sigma * jnp.eye((N - D) * D + 1)} # +1 for the x-coordinate of the 2nd bookstein anchor
+    rmh_parameters = {'sigma': rmh_sigma * jnp.eye((N - D) * D + 1 )} # + 1 for _z_bx
     smc = bjx.adaptive_tempered_smc(
         logprior_fn=_bookstein_log_prior,
         loglikelihood_fn=_bookstein_log_likelihood,
@@ -397,7 +392,7 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int = N, D:int = D, rmh
     key, n_iter, lml, states_rwm_smc = smc_bkst_inference_loop(key, smc.step, initial_smc_state)
 
     # Add Bookstein coordinates to SMC states
-    states_rwm_smc = add_bkst_to_smc_trace(states_rwm_smc, bookstein_dist, 'z', D)
+    states_rwm_smc = add_bkst_to_smc_trace(states_rwm_smc, bookstein_dist, D=D)
 
     return key, n_iter, lml, states_rwm_smc
 
@@ -420,7 +415,8 @@ if __name__ == "__main__":
 
     # Load data
     if not overwrite_data_filename:
-        data_filename = get_filename_with_ext(f"{base_data_filename}_th{data_threshold:.2f}", partial, bpf, folder=data_folder)
+        data_filename = get_filename_with_ext(f"{base_data_filename}_th{data_threshold:.2f}", partial, bpf,
+                                              folder=data_folder)
     else:
         data_filename = overwrite_data_filename
     task_filename = get_filename_with_ext(task_filename, ext='txt', folder=data_folder)
@@ -430,7 +426,7 @@ if __name__ == "__main__":
         for ti, task in enumerate(tasks):
             # Create LS embedding
             start_time = time.time()
-            key, n_iter, lml, smc_embedding = get_LSM_embedding(key, obs[si, ti, :, :])  # Other parameters to get_LSM_embeddings are taken from globals.
+            key, n_iter, lml, smc_embedding = get_LSM_embedding(key, obs[si, ti, :,:])  # Other parameters to get_LSM_embeddings are taken from globals.
             end_time = time.time()
 
             if do_print:
@@ -444,28 +440,24 @@ if __name__ == "__main__":
                     writer.writerow(stats_row)
 
             partial_txt = '_partial' if partial else ''
-            base_save_filename = f"bin_euc_S{n_sub}_{task}_embedding_th{data_threshold:.2f}{partial_txt}"
+            base_save_filename = f"bin_hyp_S{n_sub}_{task}_embedding_th{data_threshold:.2f}{partial_txt}"
 
             if make_plot:
-                z_positions = smc_embedding.particles['z']
-                radii = jnp.sqrt(jnp.sum(z_positions**2, axis=2))
-                max_r = jnp.max(radii)
+                _z_positions = smc_embedding.particles['_z']
+                z_positions = lorentz_to_poincare(get_attribute_from_trace(_z_positions, get_det_params, 'z', shape=(n_particles, N, D + 1)))
 
                 ## TODO: ADD LABELS!
                 # Plot posterior
                 plt.figure()
                 ax = plt.gca()
                 plot_posterior(z_positions,
-                               edges=obs[si, ti, 0], # Dit is ook nog raar!
+                               edges=obs[si, ti, 0],  # Dit is ook nog raar!
                                pos_labels=plt_labels,
                                ax=ax,
                                title=f"Posterior S{n_sub} {task}",
-                               hyperbolic=False,
-                               bkst=True,
-                               disk_radius=max_r,
-                               margin=r_margin,
-                               )
-                poincare_disk = plt.Circle((0, 0), max_r*(1+r_margin), color='k', fill=False, clip_on=False)
+                               hyperbolic=True,
+                               bkst=True)
+                poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
                 ax.add_patch(poincare_disk)
                 # Save figure
                 savefile = get_filename_with_ext(base_save_filename, ext='png', folder=figure_folder)
@@ -474,7 +466,7 @@ if __name__ == "__main__":
 
             # Save data
             embedding_filename = get_filename_with_ext(base_save_filename, partial=partial, bpf=bpf, folder=output_folder)
-            info_filename = get_filename_with_ext(f"bin_euc_S{n_sub}", ext='txt', folder=output_folder)
+            info_filename = get_filename_with_ext(f"bin_hyp_S{n_sub}", ext='txt', folder=output_folder)
             with open(embedding_filename, 'wb') as f:
                 pickle.dump(smc_embedding, f)
             with open(info_filename, 'a') as f:
@@ -484,7 +476,7 @@ if __name__ == "__main__":
         # Add an empty line between each subject in the info file
         with open(info_filename, 'a') as f:
             f.write('\n')
-    
+
     ## Save the new seed
     with open(seed_file, 'w') as f:
         f.write(str(key[1]))

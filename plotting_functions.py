@@ -2,7 +2,8 @@ import os
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc, Ellipse
 import matplotlib.colors as mcolors
-import jax
+
+import jax.numpy as jnp
 
 import numpy as np
 
@@ -12,13 +13,13 @@ from matplotlib import axes as Axes # I want types to be capitalized for some re
 from typing import Tuple, Callable
 from blackjax.smc.tempered import TemperedSMCState
 
-from helper_functions import triu2mat
+from helper_functions import triu2mat, invlogit
 
 def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, linewidth:float=0.5, threshold:float=0.4) -> Axes:
     """
     PARAMS
     p (N,2) : points on the Poincaré disk
-    A (N,N) or (N*(N-1)/2) : (upper triangle of the) adjacency matrix.
+    A (N,N) or (M) : (upper triangle of the) adjacency matrix.
     ax : axis to be plotted on
     R : disk radius
     linewidth : linewidth of the edges
@@ -87,6 +88,7 @@ def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, lin
         plt.figure()
         ax = plt.gca()
     N, D = p.shape
+    M = N*(N-1)//2
     assert D == 2, 'Cannot visualize a Poincaré disk with anything other than 2 dimensional points'
     if len(A.shape) == 2: # Get the upper triangle
         A = A[np.triu_indices(N, k=1)]
@@ -113,15 +115,15 @@ def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, lin
     theta_p = np.degrees(np.arctan2(py_rep-cy, px_rep-cx))
     theta_q = np.degrees(np.arctan2(qy_rep-cy, qx_rep-cx))
 
-    for i in range(int(N*(N-1)/2)):
-        if A[i] >= threshold:
+    for m in range(M):
+        if A[m] >= threshold:
             # Honestly... can't really tell you why this works but it does so someone else can do the math.
-            if cx[i] > 0:
-                theta_p[i] = theta_p[i]%360
-                theta_q[i] = theta_q[i]%360
+            if cx[m] > 0:
+                theta_p[m] = theta_p[m]%360
+                theta_q[m] = theta_q[m]%360
 
             # Draw arc
-            arc = Arc(xy=(cx[i], cy[i]), width=2*cR[i], height=2*cR[i], angle=0, theta1=min(theta_p[i],theta_q[i]), theta2=max(theta_p[i],theta_q[i]), linewidth=linewidth, alpha=A[i])
+            arc = Arc(xy=(cx[m], cy[m]), width=2*cR[m], height=2*cR[m], angle=0, theta1=min(theta_p[m],theta_q[m]), theta2=max(theta_p[m],theta_q[m]), linewidth=linewidth, alpha=A[m])
             ax.add_patch(arc)
 
     return ax
@@ -130,7 +132,8 @@ def plot_euclidean_edges(p:ArrayLike,
                          A:ArrayLike,
                          ax:Axes=None,
                          linewidth:float=0.5,
-                         threshold:float=0.4) -> Axes:
+                         threshold:float=0.4
+                         ) -> Axes:
     """
     Plots for all entries in A
     PARAMS:
@@ -152,7 +155,7 @@ def plot_euclidean_edges(p:ArrayLike,
         assert p.shape == (N,2), f'p must be ({N},2) but is {p.shape}'
         triu_indices = np.triu_indices(N, k=1)
         A = A[triu_indices]
-        M = int(N * (N - 1) / 2)
+        M = N*(N-1)//2
     elif len(A.shape) == 1:
         M = A.shape[0]
         N = int((1 + np.sqrt(1 + 8 * M))/2)
@@ -161,14 +164,14 @@ def plot_euclidean_edges(p:ArrayLike,
         raise ValueError(f'A should have 1 or 2 dimensions, but has {len(A.shape)}.')
         
     for m in range(M):
-        if A[m] > treshold: # A must be in triu_indices format
+        if A[m] >= threshold:
             p1 = p[triu_indices[0][m], :]
             p2 = p[triu_indices[1][m], :]
-            ax.plot(x=[p1[0], p2[0]],
-                     y=[p1[1], p2[1]],
-                     color='k',
-                     linewidth=linewidth,
-                     alpha=A[m])
+            ax.plot([p1[0], p2[0]],
+                    [p1[1], p2[1]],
+                    color='k',
+                    linewidth=linewidth, 
+                    alpha=A[m])
     return ax
 
 def plot_network(A:ArrayLike,
@@ -184,7 +187,8 @@ def plot_network(A:ArrayLike,
                  continuous:bool=False,
                  bkst:bool=True,
                  threshold:float=0.4,
-                 margin:float=0.1) -> Axes:
+                 margin:float=0.1
+                 ) -> Axes:
     """
     Plots a network with the given positions.
     PARAMS:
@@ -215,6 +219,9 @@ def plot_network(A:ArrayLike,
     assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
     if node_color is None:
         node_color = N*['k']
+        if bkst:
+            node_color[:2] = 2 * ['r']
+            node_color[2] = 'b'
     clean_ax = True
     if ax is None:
         plt.figure(facecolor='w')
@@ -225,9 +232,6 @@ def plot_network(A:ArrayLike,
         node_size = [v**2/10 for v in d]
 
     # Draw the nodes
-    if bkst:
-        node_color[:2] = 2*['r']
-        node_color[2] = 'y'
     ax.scatter(pos[:,0], pos[:,1],
                s=node_size,
                c=node_color,
@@ -236,9 +240,9 @@ def plot_network(A:ArrayLike,
     if hyperbolic:
         if bkst: # Add jitter to Bookstein coordinates to avoid dividing by zero
             pos[:2,:] += np.random.normal(0, 1e-6, size=(2,2))
-        plot_hyperbolic_edges(p=pos, A=A, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
+        ax = plot_hyperbolic_edges(p=pos, A=A, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
     else:
-        plot_euclidean_edges(p=pos, A=A, ax=ax, linewidth=edge_width, threshold=threshold)
+        ax = plot_euclidean_edges(p=pos, A=A, ax=ax, linewidth=edge_width)
 
     if title is not None:
         ax.set_title(title, color='k', fontsize='24')
@@ -260,7 +264,7 @@ def plot_posterior(pos_trace:ArrayLike,
                    hyperbolic:bool=False,
                    continuous:bool=False,
                    bkst:bool=False,
-                   threshold:float=0.1,
+                   threshold:float=0,
                    max_th_digits:int=4,
                    margin:float=0.1,
                    s:float=0.5,
@@ -282,7 +286,7 @@ def plot_posterior(pos_trace:ArrayLike,
     bkst : whether to deal with the first two nodes as Bookstein nodes
     threshold : minimum edge weight for the edge to be plotted
     max_th_digits : maximum number of digits to show in the title for the threshold
-    margin : percentage of disk radius to be added as whitespace
+    margin : percentage of disk radius to be added as whitespace on the sides
     s : point size for the scatter plot
     alpha_margin : transparancy margin to ensure the most variable position does not have alpha=0.
     marker_width : the width of the border around the marker
@@ -308,8 +312,8 @@ def plot_posterior(pos_trace:ArrayLike,
     pos_std = np.std(pos_trace, axis=0) # N,D position standard deviation
     pos_std_nml = pos_std/np.max(pos_std+alpha_margin) # Normalize so that the max standard deviation is (just under) 1 (which then corresponds to most transparant point)
     
-    # BOTTOM: Add edges
-    if not edges is None:
+    ### BOTTOM: Add edges
+    if edges is not None:
         if hyperbolic:
             if bkst:  # Add small jitter to Bookstein coordinates for plottability
                 pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
@@ -317,13 +321,13 @@ def plot_posterior(pos_trace:ArrayLike,
         else:
             ax = plot_euclidean_edges(pos_mean, edges, ax, edge_width)
 
-    # MID: Plot standard deviations
+    ### MID: Plot standard deviations
     for n in range(N):
         std = float(np.max(pos_std_nml[n,:]))
-        point = Ellipse((pos_mean[n,0], pos_mean[n,1]), width=pos_std[n,0], height=pos_std[n,1], alpha=1-std, color='r', fill=True)
-        ax.add_patch(point)
+        ell = Ellipse((pos_mean[n,0], pos_mean[n,1]), width=pos_std[n,0], height=pos_std[n,1], alpha=1-std, color='r', fill=True)
+        ax.add_patch(ell)
 
-    # TOP: Plot node means
+    ### TOP: Plot node means
     if pos_labels is not None: # Add position labels
         hemispheres = [lab[0] for lab in pos_labels]
         brain_region = [lab[1] for lab in pos_labels]
@@ -531,4 +535,50 @@ def plot_correlations(corr:ArrayLike,
     if add_colorbar:
         ax.figure.colorbar(im, ax=ax)
 
+    return ax
+
+def plot_sigma_convergence(sigma_chain:ArrayLike,
+                           true_sigma:float = None,
+                           ax:Axes=None,
+                           n_bins:int = 100,
+                           x_offset:float = 0.5,
+                           x_tick_interval:int = None,
+                           hcolor:str='tab:gray',
+                           true_sigma_label:str='True sigma/bound',
+                           legend:bool=True) -> Axes:
+    """
+    Plots the convergence of sigma as the sequence of SMC distributions
+    PARAMS:
+    sigma_chain : (n_iter, n_particles) array of sigma proposals
+    true_sigma : if passed, will plot a red line to indicate the true sigma value (PRE-INVLOGIT).
+    ax : the axis to plot on
+    n_bins : number of bins per histogram
+    x_tick_interval : how many-th iteration is ticked. If None is passed, it autoscales.
+    x_offset : distance in between each histogram
+    hcolor : color of the histograms
+    true_sigma_label : legend label for the true sigma line
+    legend : whether to add a legend
+    """
+    if ax is None:
+        plt.figure(20, 10)
+        ax = plt.gca()
+
+    n_iter = len(sigma_chain)
+    if x_tick_interval is None:
+        x_tick_interval = n_iter//10
+
+    for it in range(n_iter):
+        sigma_hist, sigma_bins = jnp.histogram(invlogit(sigma_chain[it]), bins=n_bins)
+        # Normalize so the peak is at 1
+        sigma_hist_nml = sigma_hist / jnp.max(sigma_hist)
+        x_start = it * (1 + x_offset)
+        ax.stairs(sigma_hist_nml + x_start, sigma_bins, baseline=x_start, fill=True, color=hcolor, orientation='horizontal')
+
+    ax.set_xticks(ticks=[it * (1 + x_offset) for it in range(n_iter)][::x_tick_interval], labels=np.arange(n_iter)[::x_tick_interval])
+    xmin, xmax = 0, (n_iter + 1) * (1 + x_offset)
+    if true_sigma is not None:
+        ax.hlines(invlogit(true_sigma), xmin, xmax, 'red', 'dashed', label=true_sigma_label)
+    ax.set_xlim(xmin, xmax)
+    if legend:
+        ax.legend()
     return ax

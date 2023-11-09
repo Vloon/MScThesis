@@ -29,13 +29,15 @@ from typing import Callable, Tuple
 ## OS stuff
 def set_GPU(gpu:str = '') -> None:
     """
-    Sets the GPU safely in os.environ
+    Sets the GPU safely in os.environ, and does some JAX initialization
     PARAMS:
     gpu : string format of the GPU used. Multiple GPUs can be seperated with commas, e.g. '0,1,2'
     """
     if gpu is None: # Safety, if visible divises is set to none in os, then all GPUs are used
         gpu = ''
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
+    jax.config.update("jax_default_device", jax.devices()[0])
+    jax.config.update("jax_enable_x64", True)
 
 def get_cmd_params(parameter_list:list) -> dict:
     """
@@ -83,7 +85,7 @@ def get_filename_with_ext(base_filename:str, partial:bool=False, bpf:bool=False,
     """
     partial_txt = '_partial' if partial else ''
     bpf_txt = '_bpf' if bpf else ''
-    return f'{folder}/{base_filename}{partial_txt}{bpf_txt}.{ext}'
+    return f"{folder}/{base_filename}{partial_txt}{bpf_txt}.{ext}"
 
 def get_safe_folder(folder:str) -> str:
     """
@@ -144,7 +146,7 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
                 obs[si, ti, ei, :] = observed_values
     return obs, tasks, encs
 
-def obs_matrix_to_dict(): ### lijkt me een goed idee? 
+def obs_matrix_to_dict(): ### TODO: Implement
     pass
 
 def node_pos_dict2array(pos_dict:dict) -> np.ndarray:
@@ -251,7 +253,7 @@ def euclidean_distance(z:ArrayLike) -> jnp.ndarray:
     """
     Returns the Euclidean distance between all elements in z, calculated via the Gram matrix.
     PARAMS:
-    z : NxD latent positions
+    z : (N,D) latent positions
     """
     G = jnp.dot(z, z.T)
     g = jnp.diag(G)
@@ -303,7 +305,7 @@ def lorentz_distance(z:ArrayLike) -> jnp.ndarray:
     """
     Returns the hyperbolic distance between all N points in z as a N x N matrix
     PARAMS:
-    z : points in hyperbolic space
+    z : (N,D) points in hyperbolic space
     """
     def arccosh(x:ArrayLike) -> jnp.ndarray:
         """
