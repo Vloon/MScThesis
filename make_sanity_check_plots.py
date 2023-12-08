@@ -17,8 +17,7 @@ from plotting_functions import plot_sigma_convergence
 
 arguments = [('-df', 'data_folder', str, 'Data'), # data folder
              ('-conbdf', 'con_base_data_filename', str, 'processed_data'),  # the most basic version of the filename of the continuous saved data
-             ('-binbdf', 'bin_base_data_filename', str, 'binary_data'), # the most basic version of the filename of the binary saved data
-             ('-datath', 'data_threshold', float, 0.5), # threshold for the binary data
+             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_max_0.05unconnected'), # the most basic version of the filename of the binary saved data
              ('-overwritedf', 'overwrite_data_filename', str, None),  # if used, it overwrites the default filename
              ('-if', 'base_input_folder', str, 'Embeddings'), # base input folder of the embeddings
              ('-np', 'n_particles', int, 1000), # number of particles used in the embedding
@@ -34,6 +33,7 @@ arguments = [('-df', 'data_folder', str, 'Data'), # data folder
              ('-geo', 'geometry', str, 'hyp'), # LS geometry ('hyp' or 'euc')
              ('-nbins', 'n_bins', int, 100), # number of bins for the distance correlation histogram
              ('-ssf', 'save_sigma_filename', str, 'sbt'), # filename WITHOUT the edge type and geometry
+             ('-setsig', 'set_sigma', float, None), # value that sigma is set to (or None if learned)
              ('-palpha', 'plot_alpha', float, 1), # alpha of the scatter plots
              ('--partial', 'partial', bool), # whether to use partial correlations
              ('--bpf', 'bpf', bool), # whether to use band-pass filtered correlations
@@ -42,12 +42,12 @@ arguments = [('-df', 'data_folder', str, 'Data'), # data folder
              ]
 
 global_params = get_cmd_params(arguments)
+set_GPU(global_params['gpu'])
 data_folder = global_params['data_folder']
 edge_type = global_params['edge_type']
 geometry = global_params['geometry']
-data_threshold = global_params['data_threshold']
 
-base_data_filename = f"{global_params['bin_base_data_filename']}_th{data_threshold:.2f}" if edge_type == 'bin' else global_params['con_base_data_filename']
+base_data_filename = global_params['bin_base_data_filename'] if edge_type == 'bin' else global_params['con_base_data_filename']
 overwrite_data_filename = global_params['overwrite_data_filename']
 n_particles = global_params['n_particles']
 N = global_params['N']
@@ -61,14 +61,14 @@ number_plot_samples = global_params['number_plot_samples']
 subject1 = global_params['subject1']
 subjectn = global_params['subjectn']
 
-# data_threshold = global_params['data_threshold']
 save_sigma_filename = global_params['save_sigma_filename']
+set_sigma = global_params['set_sigma']
+set_sigma_txt = f"_sigma_set_{set_sigma}" if set_sigma is not None else ''
 n_bins = global_params['n_bins']
 plot_alpha = global_params['plot_alpha']
 partial = global_params['partial']
 add_regression = global_params['add_regression']
 bpf = global_params['bpf']
-set_GPU(global_params['gpu'])
 
 det_params_dict = {'bin_euc':bin_euc_det_params,
                    'bin_hyp':bin_hyp_det_params,
@@ -86,9 +86,9 @@ obs, tasks, encs = load_observations(data_filename, task_filename, subject1, sub
 
 for si, n_sub in enumerate(range(subject1, subjectn + 1)):
     for ti, task in enumerate(tasks):
-        if edge_type == 'con':
+        if edge_type == 'con' and set_sigma is None:
             ## Load and plot sigma convergence
-            sigma_filename = get_filename_with_ext(f"con_{geometry}_{save_sigma_filename}_S{n_sub}_{task}", partial=partial, folder=data_folder)
+            sigma_filename = get_filename_with_ext(f"con_{geometry}_{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=data_folder)
             with open(sigma_filename, 'rb') as f:
                 sigma_chain = pickle.load(f)
 
@@ -104,20 +104,19 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
             plt.close()
 
         # Load embedding
-        th_txt = f"_th{data_threshold:.2f}" if edge_type == 'bin' else ''
-        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding{th_txt}", partial=partial, folder=input_folder)
+        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{base_data_filename}{set_sigma_txt}", partial=partial, folder=input_folder)
         with open(embedding_filename, 'rb') as f:
             embedding = pickle.load(f)
 
         # Get embedding distances
         distance_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd') # n_particles x M
-        if edge_type == 'con':
+        if edge_type == 'con' and set_sigma is None:
             sigma_div_bound_trace = invlogit(embedding.particles['sigma_beta_T']) # n_particles x 1
             bound_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'bound') # n_particles x M
             sigma_trace = sigma_div_bound_trace * bound_trace # n_particles x M
 
         if ground_truth:
-            gt_filename = get_filename_with_ext(f"gt_prior_S{n_sub}_T{ti}_N_{N}_n_obs_2_sbt_-2.0", folder=gt_folder) # <-- srry this is uggley
+            gt_filename = get_filename_with_ext(f"gt_prior_S{n_sub}_T{ti}_N_{N}_n_obs_{n_obs}_sbt_{sbt}", folder=gt_folder) # <-- srry this is uggley
             with open(gt_filename, 'rb') as f:
                 gt_embedding = pickle.load(f)
             gt_distances = det_params_func(gt_embedding[latpos])['d']
@@ -141,9 +140,9 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
             plt.savefig(output_file)
             plt.close()
 
-        if edge_type == 'con':
+        if edge_type == 'con' and set_sigma is None:
             ### PLOT SIGMA DISTRIBUTIONS
-            output_file = get_filename_with_ext(f"sigma_over_bound_S{n_sub}_{task}", partial, bpf, ext='png', folder=output_folder)
+            output_file = get_filename_with_ext(f"sigma_over_bound_S{n_sub}_{task}_{base_data_filename}", partial, bpf, ext='png', folder=output_folder)
             title = f"Sigma over bound distribution\nS{n_sub} {task}"
             plt.figure()
             sigma_div_bound_hist, sigma_div_bound_bins = jnp.histogram(sigma_div_bound_trace, bins=n_bins, density=True)
@@ -164,7 +163,7 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
             ymargin = 5
 
             ### PLOT BOUND DISTRIBUTIONS
-            output_file = get_filename_with_ext(f"bound_S{n_sub}_{task}", partial, bpf, ext='png', folder=output_folder)
+            output_file = get_filename_with_ext(f"bound_S{n_sub}_{task}_{base_data_filename}", partial, bpf, ext='png', folder=output_folder)
             title = f"Bound distribution\nS{n_sub} {task}"
             plt.figure()
             plt.autoscale(True)
@@ -190,7 +189,7 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
             plt.savefig(output_file)
             plt.close()
 
-            output_file = get_filename_with_ext(f"sigma_S{n_sub}_{task}", partial, bpf, ext='png',folder=output_folder)
+            output_file = get_filename_with_ext(f"sigma_S{n_sub}_{task}_{base_data_filename}", partial, bpf, ext='png',folder=output_folder)
             title = f"Sigma distribution\nS{n_sub} {task}"
             plt.figure()
             sigma_hist, sigma_bins = jnp.histogram(sigma_trace, bins=n_bins, density=True)
@@ -224,8 +223,7 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                 output_file = get_filename_with_ext(f"dist_vs_gt_dist_S{n_sub}_{task}_sample{pi}", partial, bpf, ext='png', folder=output_folder)
                 title = f"Embedding distance vs Ground truth distance\nS{n_sub} {task}\nParticle {ppsi}"
                 plt.figure()
-                ax = plt.gca()
-                ax.scatter(distances, gt_distances, s=.5, c='k', alpha=plot_alpha)
+                plt.scatter(distances, gt_distances, s=.5, c='k', alpha=plot_alpha)
                 plt.xlabel('Embedding distances')
                 plt.ylabel('Ground truth distances')
                 if add_regression:
@@ -234,15 +232,14 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                     x = np.linspace(xmin, xmax, M)
                     y = reg.intercept_ + reg.coef_ * x
                     plt.plot(x, y, color='r')
-                ax.set_title(title)
-                plt.tight_layout()
-                plt.savefig(output_file)
+                plt.title(title)
+                plt.savefig(output_file, bbox_inches='tight')
                 plt.close()
 
             for ei, enc in enumerate(encs):
                 correlations = obs[si, ti, ei, :] # M observed correlations
 
-                output_file = get_filename_with_ext(f"dist_vs_corr_S{n_sub}_{task}_{enc}_sample{pi}",partial,bpf,ext='png',folder=output_folder)
+                output_file = get_filename_with_ext(f"dist_vs_corr_S{n_sub}_{task}_{enc}_sample{pi}_{base_data_filename}",partial,bpf,ext='png',folder=output_folder)
 
                 partial_txt = 'partial ' if partial else ''
                 title = f"Distance vs {partial_txt}correlation\nS{n_sub} {task} {enc}\nParticle {ppsi}"

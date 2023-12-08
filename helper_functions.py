@@ -5,7 +5,8 @@ from matplotlib.patches import Arc, Ellipse
 import matplotlib.colors as mcolors
 import numpy as np
 import time
-import argparse 
+import argparse
+import re
 
 # File stuff
 import pickle
@@ -17,6 +18,7 @@ from jax.config import config
 import jax.scipy as jsp
 import jax.scipy.stats as jstats
 # config.update("jax_enable_x64", True)
+import blackjax as bjx
 
 # Typings
 from jax._src.prng import PRNGKeyArray
@@ -26,7 +28,13 @@ from blackjax.mcmc.rmh import RMHState
 from matplotlib import axes as Axes # I want types to be capitalized for some reason.
 from typing import Callable, Tuple
 
-## OS stuff
+
+## IO ish stuff
+def print_versions() -> None:
+    print('Using blackjax version', bjx.__version__)
+    print('Using JAX version', jax.__version__)
+    print(f'Running on {jax.devices()}')
+
 def set_GPU(gpu:str = '') -> None:
     """
     Sets the GPU safely in os.environ, and does some JAX initialization
@@ -36,8 +44,6 @@ def set_GPU(gpu:str = '') -> None:
     if gpu is None: # Safety, if visible divises is set to none in os, then all GPUs are used
         gpu = ''
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
-    jax.config.update("jax_default_device", jax.devices()[0])
-    jax.config.update("jax_enable_x64", True)
 
 def get_cmd_params(parameter_list:list) -> dict:
     """
@@ -83,6 +89,7 @@ def get_filename_with_ext(base_filename:str, partial:bool=False, bpf:bool=False,
     bpf : whether to use band-pass filtered rs-fMRI data
     ext : file extension
     """
+    ## TODO: change to using os.path functions oops
     partial_txt = '_partial' if partial else ''
     bpf_txt = '_bpf' if bpf else ''
     return f"{folder}/{base_filename}{partial_txt}{bpf_txt}.{ext}"
@@ -95,6 +102,33 @@ def get_safe_folder(folder:str) -> str:
         os.makedirs(folder)
     return folder
 
+def get_plt_labels(label_location:str, make_plot:bool, no_labels:bool, N:int) -> ArrayLike:
+    """
+    Returns the label location and checks for a bunch of stuff
+    PARAMS:
+    label_location : the location of the labels
+    make_plot : whether to make a plot
+    no_labels : whether to use labels
+    N : number of nodes
+    """
+    if make_plot and not no_labels:
+        label_data = np.load(label_location)
+        plt_labels = label_data[label_data.files[0]]
+        if len(plt_labels) != N:
+            plt_labels = None
+    else:
+        plt_labels = None
+    return plt_labels
+
+def key2str(key:PRNGKeyArray) -> str:
+    """
+    Returns the string version of the final entry in the PRNGKeyArray
+    PARAMS:
+    key : JAX key
+    """
+    numbers = re.findall(r"[0-9]+", str(key))
+    return numbers[-1]
+
 ## Data stuff
 def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
     """
@@ -102,7 +136,7 @@ def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
     PARAMS:
     x : input array
     """
-    return np.all(np.isfinite(x)), np.where(~np.isfinite(x))
+    return jnp.all(jnp.isfinite(x)), jnp.where(jnp.logical_not(jnp.isfinite(x)))
 
 def open_taskfile(task_filename:str) -> Tuple[list, list]:
     """
@@ -130,7 +164,6 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
     # Open the data file
     with open(data_filename, 'rb') as f:
         obs_corr_dict = pickle.load(f)
-
     tasks, encs = open_taskfile(task_filename)
 
     # Get observations for each subject for each task
@@ -146,7 +179,7 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
                 obs[si, ti, ei, :] = observed_values
     return obs, tasks, encs
 
-def obs_matrix_to_dict(): ### TODO: Implement
+def obs_matrix_to_dict(): ### TODO: Implement?? maybe??
     pass
 
 def node_pos_dict2array(pos_dict:dict) -> np.ndarray:
@@ -170,9 +203,9 @@ def triu2mat(v:ArrayLike) -> ArrayLike:
     """
     m = len(v)
     n = int((1 + np.sqrt(1 + 8 * m))/2)
-    mat = np.zeros((n, n))
-    triu_indices = np.triu_indices(n, k=1)
-    mat[triu_indices] = v
+    mat = jnp.zeros((n, n))
+    triu_indices = jnp.triu_indices(n, k=1)
+    mat = mat.at[triu_indices].set(v)
     return mat + mat.T
 
 def get_trace_correlation(sampled_d:ArrayLike, ground_truth_d:ArrayLike, make_np:bool=False) -> ArrayLike:
@@ -197,7 +230,7 @@ def get_trace_correlation(sampled_d:ArrayLike, ground_truth_d:ArrayLike, make_np
     _, corrs = jax.lax.scan(get_corr, None, sampled_d)
     return corrs
 
-def get_attribute_from_trace(LSM_embeddings:ArrayLike, get_det_params:Callable, attribute:str='d_norm', shape:tuple=None, param_kwargs:dict={}) -> jnp.ndarray:
+def get_attribute_from_trace(LSM_embeddings:ArrayLike, get_det_params:Callable, attribute:str='d', shape:tuple=None, param_kwargs:dict={}) -> jnp.ndarray:
     """
     Calculates the distance for a whole trace of positions
     PARAMS:
@@ -205,7 +238,7 @@ def get_attribute_from_trace(LSM_embeddings:ArrayLike, get_det_params:Callable, 
     get_det_params : function to get the deterministic parameters according to the correct model
     attributes : dictionary key corresponding to the desired attribute
     shape : shape of the output, T x n_particles x "shape of attribute for 1 particle"
-    param_kwargs : parameters for the get_det_params function (e.g. {'mu' = [0.,0.]})
+    param_kwargs : parameters for the get_det_params function (e.g. {'mu' : [0.,0.]})
     """
     if len(LSM_embeddings.shape) == 4:
         T, n_particles, N, _ = LSM_embeddings.shape
@@ -240,6 +273,14 @@ def get_attribute_from_trace(LSM_embeddings:ArrayLike, get_det_params:Callable, 
     return attributes[0] if T == 1 else attributes
 
 ## Math
+def logit(x:ArrayLike) -> ArrayLike:
+    """
+    Definition of the logit function. 
+    PARAMS:
+    x : input variables
+    """
+    return jnp.log(1/(1-x))
+
 def invlogit(x:ArrayLike) -> ArrayLike:
     """
     Definition of the inverse-logit function (a.k.a. the logistic function)
@@ -258,7 +299,8 @@ def euclidean_distance(z:ArrayLike) -> jnp.ndarray:
     G = jnp.dot(z, z.T)
     g = jnp.diag(G)
     ones = jnp.ones_like(g)
-    return jnp.sqrt(jnp.outer(ones, g) + jnp.outer(g, ones) - 2 * G)
+    inside = jnp.maximum(jnp.outer(ones, g) + jnp.outer(g, ones) - 2 * G, 0)
+    return jnp.sqrt(inside)
 
 ## Hyperbolic math
 def lorentz_to_poincare(networks:ArrayLike) -> np.ndarray:

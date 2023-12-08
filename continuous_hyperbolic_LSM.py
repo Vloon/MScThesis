@@ -1,7 +1,8 @@
 # Home brew functions
 from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, get_attribute_from_trace, \
-    invlogit, lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map, is_valid
-from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace
+    logit, invlogit, lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map, is_valid, get_plt_labels, print_versions, \
+    key2str
+from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace, smc_bkst_inference_loop
 from plotting_functions import plot_posterior, plot_network
 
 # Basics
@@ -30,23 +31,23 @@ from blackjax.smc.base import SMCInfo
 from typing import Callable, Tuple
 
 # Keep this here in case you somehow import the file and need these constants??
-eps = 1e-5 # If eps < 1e-6, rounding to zero can start to happen... DON'T TEMPT IT BOY!
+eps = 1e-5 # If eps < 1e-5, rounding to zero can start to happen... DON'T TEMPT IT BOY!
 obs_eps = 1e-12
 mu = [0., 0.]
 sigma = 1.
 mu_sigma = 0.
 sigma_sigma = 1.
-overwrite_sigma = None
+overwrite_sigma_over_bound = None
 N = 164
 D = 2
 s1 = 1
-sn = 25
-n_particles = 1_000
-n_mcmc_steps = 100
+sn = 100
+n_particles = 2_000
+n_mcmc_steps = 500
 rmh_sigma = 1e-2
 bookstein_dist = 0.3
 data_folder = 'Data'
-base_data_filename = 'processed_data'
+base_data_filename = 'processed_data_downsampled_evenly_spaced'
 task_filename = 'task_list'
 base_output_folder = 'Embeddings'
 make_plot = False
@@ -71,7 +72,7 @@ if __name__ == "__main__":
                  ('-s', 'sigma', float, sigma),  # std of distribution to sample _z
                  ('-ms', 'mu_sigma', float, mu_sigma),  # mean of distribution to sample sigma_T
                  ('-ss', 'sigma_sigma', float, sigma_sigma),  # std of distribution to sample sigma_T
-                 ('-overwritesig', 'overwrite_sigma', float, overwrite_sigma), # overwrite sigma_T with this value if not None
+                 ('-overwritesig', 'overwrite_sigma_over_bound', float, overwrite_sigma_over_bound), # overwrite sigma_T with this value if not None
                  ('-N', 'N', int, N),  # number of nodes
                  ('-D', 'D', int, D),  # latent space dimensions
                  ('-s1', 'subject1', int, s1),  # first subject to be used
@@ -106,12 +107,13 @@ if __name__ == "__main__":
 
     # Get arguments from CMD
     global_params = get_cmd_params(arguments)
+    set_GPU(global_params['gpu']) ### MUST BE RUN FIRST
     eps = global_params['eps']
     obs_eps = global_params['obs_eps']
     mu = global_params['mu']
     sigma = global_params['sigma']
     mu_sigma = global_params['mu_sigma']
-    overwrite_sigma = global_params['overwrite_sigma']
+    overwrite_sigma_over_bound = global_params['overwrite_sigma_over_bound']
     sigma_sigma = global_params['sigma_sigma']
     N = global_params['N']
     M = N*(N-1)//2
@@ -143,20 +145,19 @@ if __name__ == "__main__":
     dl = global_params['dl']
     seed_file = global_params['seed_file']
     seed = global_params['seed']
-    set_GPU(global_params['gpu'])
 
     # Initialize JAX stuff
     if do_print:
-        print('Using blackjax version', bjx.__version__)
-        print(f'Running on {jax.devices()}')
+        print_versions()
 
-    # USE JAX ONLY AFTER SETTING THE GPU, OTHERWISE IT WILL USE ALL GPUS
     if seed is None:
         with open(seed_file, 'r') as f:
             seed = int(f.read())
     key = jax.random.PRNGKey(seed)
 
     mu = jnp.array(mu)
+
+overwrite_sigma_val = logit(overwrite_sigma_over_bound) if overwrite_sigma_over_bound is not None else None
 
 ## Define functions to calculate the continuous hyperbolic parameters
 def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps, **kwargs) -> ArrayLike:
@@ -189,17 +190,13 @@ def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps, **kwargs) -> Ar
     z = exponential_map(mu, u)
 
     d = lorentz_distance(z)[triu_indices]
-    d_norm = jnp.clip(d/(jnp.max(d)), eps, 1-eps) # Clip to make sure the boundaries are excluding 0, 1.
-    mu_beta_old = 1-d_norm
     mu_beta = jnp.clip(jnp.exp(-d**2), eps, 1-eps) # Clip means to be in (0,1) excl.
     bound = jnp.sqrt(mu_beta*(1-mu_beta))
 
     params = {'_z':_z,
               'z':z,
               'd':d,
-              'd_norm':d_norm,
               'mu_beta':mu_beta,
-              'mu_beta_old':mu_beta_old,
               'bound':bound}
     return params
 
@@ -217,7 +214,7 @@ def get_ab(mu_beta:ArrayLike, sigma_beta:ArrayLike, eps:float=eps) -> Tuple[Arra
     return a, b
 
 ## Sampling functions
-def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, **kwargs) -> Tuple[PRNGKeyArray, dict]:
+def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, overwrite_sigma_val:float=overwrite_sigma_val, **kwargs) -> Tuple[PRNGKeyArray, dict]:
     """
     Samples _z positions from the Wrapped Hyperbolic normal distribution (Nagano et al. 2019), as well as transformed stds of the beta distributions.
     NOTE: the resulting _z positions are not in Bookstein form. If you want to sample in proper Bookstein form, you can't yet scuzi.
@@ -231,7 +228,7 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float=sigma, mu_sigma:floa
     """
     key, _z_key, sigma_key = jax.random.split(key, 3)
     _z = sigma*jax.random.normal(_z_key, shape=shape) # Is always centered at 0
-    sigma_beta_T = sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma
+    sigma_beta_T = jax.lax.select(overwrite_sigma_val is not None, overwrite_sigma_val, sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma)
 
     prior = {'_z':_z,
             'sigma_beta_T':sigma_beta_T}
@@ -269,7 +266,7 @@ def sample_observation(key:PRNGKeyArray, prior:dict, n_samples:int=1, mu:ArrayLi
     return key, A
 
 ## Probability distributions
-def log_prior(_z:ArrayLike, sigma_beta_T:float, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma) -> float:
+def log_prior(_z:ArrayLike, sigma_beta_T:float, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, overwrite_sigma:bool=False) -> float:
     """
     Returns the log-prior for a full _z state and sigma state, no Bookstein faffing.
     PARAMS:
@@ -278,12 +275,13 @@ def log_prior(_z:ArrayLike, sigma_beta_T:float, sigma:float=sigma, mu_sigma:floa
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     mu_sigma : mean of the 1D Gaussian that samples the transformed standard deviation of the beta distribution
     sigma_sigma : standard deviation of the 1D Gaussian that samples the transformed standard deviation of the beta distribution
+    overwrite_sigma : whether we overwrite sigma with a set value (removing it from the RVs)
     """
     logprob__z = jstats.norm.logpdf(_z, loc=0, scale=sigma).sum()
-    logprob_sigma_T = jstats.norm.logpdf(sigma_beta_T, loc=mu_sigma, scale=sigma_sigma).sum()
+    logprob_sigma_T = jax.lax.select(overwrite_sigma, jstats.norm.logpdf(sigma_beta_T, loc=mu_sigma, scale=sigma_sigma).sum(), 0.) # Replace with 0 if we overwrite since it's not an RV
     return logprob__z + logprob_sigma_T
 
-def bookstein_log_prior(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma) -> float:
+def bookstein_log_prior(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, overwrite_sigma:bool=False) -> float:
     """
     Returns the log-prior, taking into account Bookstein anchors.
     PARAMS:
@@ -293,10 +291,11 @@ def bookstein_log_prior(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, sigma:flo
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     mu_sigma : mean of the Gaussian of transformed sigma
     sigma_sigma : standard deviation of the Gaussian of transformed sigma
+    overwrite_sigma : whether we overwrite sigma with a set value (removing it from the RVs)
     """
     _zb_x_logprior = jstats.truncnorm.logpdf(_zb_x, a=0, b=jnp.inf, loc=-bookstein_dist, scale=sigma).sum() # Logprior for the node restricted in y = 0.
     _zb_y_logprior = jnp.log(2)+jstats.norm.logpdf(_z[0,:], loc=0, scale=sigma).sum() - jnp.inf*(_z[0,1] < 0) # Logprior for the node restricted in y>0 # Kan dit niet ook met een truncnorm?
-    rest_logprior = log_prior(_z[1:,:], sigma_beta_T, sigma, mu_sigma, sigma_sigma) # Use all sigma_T's, not all _z values
+    rest_logprior = log_prior(_z[1:,:], sigma_beta_T, sigma, mu_sigma, sigma_sigma, overwrite_sigma) # Use all sigma_T's, not all _z values
     return rest_logprior + _zb_x_logprior + _zb_y_logprior
 
 def log_likelihood(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, obs_eps:float=obs_eps) -> float:
@@ -351,7 +350,7 @@ def bookstein_log_likelihood(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, obs:
     _zc = jnp.concatenate([bookstein_anchors, _z])
     return log_likelihood(_zc, sigma_beta_T, obs)
 
-def log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike,sigma:float=sigma) -> float:
+def log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma) -> float:
     """
     Returns the log-probability density of the observed edge weights under the Continuous Hyperbolic LSM.
     PARAMS:
@@ -360,7 +359,7 @@ def log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike,sigma:float=sigm
     obs : observed correlations (samples x edges)
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     """
-    prior_prob = log_prior(_z, sigma_beta_T, sigma)
+    prior_prob = log_prior(_z, sigma_beta_T, sigma, mu_sigma, sigma_sigma)
     likelihood_prob = log_likelihood(_z, sigma_beta_T, obs)
     return prior_prob + likelihood_prob
 
@@ -381,7 +380,7 @@ def bookstein_log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, _zb_x
         return bookstein_log_prior(_z, _zb_x, sigma_beta_T, sigma) + bookstein_log_likelihood(_z, _zb_x, sigma_beta_T, obs)
 
 ## SMC + Bookstein methods
-def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, bookstein_dist:float=bookstein_dist) -> Tuple[PRNGKeyArray, dict]:
+def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, bookstein_dist:float=bookstein_dist, overwrite_sigma:bool=False) -> Tuple[PRNGKeyArray, dict]:
     """
     Initializes the SMC particles, but with Bookstein coordinates.
     PARAMS:
@@ -392,49 +391,18 @@ def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, 
     mu_sigma : mean of the transformed std distribution
     sigma_sigma : std of the transformed std distribution
     bookstein_dist : offset of the first Bookstein anchor
+    overwrite_sigma : whether to overwrite sigma
     """
     N, D = shape
     key, _z_key, _z_bx_key, sigma_beta_T_key = jax.random.split(key, 4)
     initial_position = {'_z': smc_bookstein_position(sigma*jax.random.normal(_z_key, shape=(num_particles, N-D, D))), # N-D to skip first D bkst nodes. First node is rigid.
                         '_zb_x': sigma*jax.random.truncated_normal(_z_bx_key, lower=-bookstein_dist, upper=jnp.inf, shape=(num_particles,1)), # Second node is restricted to just an x-position.
-                        'sigma_beta_T': sigma_sigma*jax.random.normal(sigma_beta_T_key, shape=(num_particles,1))+mu_sigma}
+                       }
+    if not overwrite_sigma:
+        initial_position['sigma_beta_T'] = sigma_sigma*jax.random.normal(sigma_beta_T_key, shape=(num_particles,1))+mu_sigma
     return key, initial_position
 
-def smc_bkst_inference_loop(key:PRNGKeyArray, smc_kernel:Callable, initial_state:ArrayLike) -> Tuple[PRNGKeyArray, float, TemperedSMCState]:
-    """
-    Run the temepered SMC algorithm with Bookstein anchoring.
-
-    Run the adaptive algorithm until the tempering parameter lambda reaches the value lambda=1.
-    PARAMS:
-    key: random key for JAX functions
-    smc_kernel: kernel for the SMC particles
-    initial_state: beginning position of the algorithm
-    """
-    def cond(carry):
-        state = carry[6]
-        return state.lmbda < 1
-
-    @jax.jit
-    def step(carry):
-        i, lml, lambdas, weights, ancestors, s_values, state, key = carry
-        key, subkey = jax.random.split(key)
-        state, info = smc_kernel(subkey, state)
-        s_values = s_values.at[i].set(state.particles['sigma_beta_T'])
-        ancestors = ancestors.at[i].set(info.ancestors)
-        weights = weights.at[i].set(info.weights)
-        lambdas = lambdas.at[i].set(state.lmbda)
-        lml += info.log_likelihood_increment
-        return i+1, lml, lambdas, weights, ancestors, s_values, state, key
-
-    max_iters = 200
-    n_iter, lml, lambdas, weights, ancestors, s_values, final_state, key = jax.lax.while_loop(
-        cond, step, (0, 0., jnp.zeros((max_iters,)), jnp.zeros((max_iters, n_particles)), jnp.zeros((max_iters, n_particles)), jnp.zeros((max_iters, n_particles, 1)), initial_state, key)
-    )
-    if n_iter > max_iters and do_print:
-        print(f"Embedding took {n_iter} iterations but max_iter is only {max_iters}! Not all proposals are saved.")
-    return key, n_iter, lml, lambdas, weights, ancestors, s_values, final_state
-
-def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sigma:float=rmh_sigma, n_mcmc_steps:int=n_mcmc_steps, n_particles:int=n_particles) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]:
+def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sigma:float=rmh_sigma, n_mcmc_steps:int=n_mcmc_steps, n_particles:int=n_particles, overwrite_sigma_val:float=overwrite_sigma_val) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]:
     """
     Creates a latent space embedding based on the given observations.
     Returns key,
@@ -446,12 +414,21 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
     rmh_sigma : std of the within-SMC RMH sampler
     n_mcmc_steps : number of MCMC steps taken within each SMC iteration
     n_particles : number of SMC particles
+    overwrite_sigma_val : value with which to overwrite sigma
     """
     # Define smc+bkst sampler
-    _bookstein_log_prior = lambda state: bookstein_log_prior(**state) # Parameters are taken from global parameters
-    _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs) # Parameters are taken from global parameters
+    overwrite_sigma = overwrite_sigma_val is not None
+    # Define which paremeter sets are used for the prior/likelihood.
+    # Other parameters are taken from global parameters
+    if overwrite_sigma:
+        _bookstein_log_prior = lambda state: bookstein_log_prior(**state, sigma_beta_T=overwrite_sigma_val, overwrite_sigma=True)
+        _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs, sigma_beta_T=overwrite_sigma_val)
+    else:
+        _bookstein_log_prior = lambda state: bookstein_log_prior(**state)
+        _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs)
 
-    rmh_parameters = {'sigma': rmh_sigma * jnp.eye((N - D) * D + 1 + 1)} # 1 for _z_bx, 1 for sigma_beta_T
+    n_vars = (N - D) * D + 1 + 1 - (overwrite_sigma_val is not None)  # 1 for z_bx, 1 for sigma_beta_T (which we remove if we overwrite)
+    rmh_parameters = {'sigma': rmh_sigma * jnp.eye(n_vars)}
     smc = bjx.adaptive_tempered_smc(
         logprior_fn=_bookstein_log_prior,
         loglikelihood_fn=_bookstein_log_likelihood,
@@ -463,16 +440,21 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
     )
 
     # Initialize the particles
-    key, init_position = initialize_bkst_particles(key, n_particles, (N, D))
+    key, init_position = initialize_bkst_particles(key, n_particles, (N, D), overwrite_sigma=overwrite_sigma)
     initial_smc_state = smc.init(init_position)
 
     # Run SMC inference
-    key, n_iter, lml, lambdas, weights, ancestors, s_values, states_rwm_smc = smc_bkst_inference_loop(key, smc.step, initial_smc_state)
+    results = smc_bkst_inference_loop(key, smc.step, initial_smc_state)
 
     # Add Bookstein coordinates to SMC states
-    states_rwm_smc = add_bkst_to_smc_trace(states_rwm_smc, bookstein_dist, D=D)
+    states_rwm_smc = add_bkst_to_smc_trace(results[-1], bookstein_dist, D=D)
 
-    return key, n_iter, lml, lambdas, weights, ancestors, s_values, states_rwm_smc
+    if overwrite_sigma_val is None:
+        key, n_iter, lml, sigma_trace, _ = results
+        return key, n_iter, lml, sigma_trace, states_rwm_smc
+    else:
+        key, n_iter, lml, _ = results
+        return key, n_iter, lml, states_rwm_smc
 
 if __name__ == "__main__":
     """
@@ -482,13 +464,7 @@ if __name__ == "__main__":
     """
 
     # Load labels
-    if make_plot and not no_labels:
-        label_data = np.load(label_location)
-        plt_labels = label_data[label_data.files[0]]
-        if len(plt_labels) is not N:
-            plt_labels = None
-    else:
-        plt_labels = None
+    plt_labels = get_plt_labels(label_location, make_plot, no_labels, N)
 
     # Load data
     if not overwrite_data_filename:
@@ -502,8 +478,12 @@ if __name__ == "__main__":
         for ti, task in enumerate(tasks):
             # Create LS embedding
             start_time = time.time()
-            key, n_iter, lml, lambdas, weights, ancestors, s_values, smc_embedding = get_LSM_embedding(key, obs[si, ti, :, :])  # Other parameters to get_LSM_embeddings are taken from globals.
+            results = get_LSM_embedding(key, obs[si, ti, :, :])  # Other parameters to get_LSM_embeddings are taken from globals.
             end_time = time.time()
+            if overwrite_sigma_val is not None:
+                key, n_iter, lml, smc_embedding = results
+            else:
+                key, n_iter, lml, sigma_trace, smc_embedding = results
 
             if do_print:
                 print(f'Embedded S{n_sub}_{task} in {n_iter} iterations')
@@ -517,44 +497,45 @@ if __name__ == "__main__":
 
             # Save sigma values
             if save_sigma_chain:
-                filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}", partial=partial, folder=data_folder)
+                filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=f"{data_folder}/sbt_traces")
                 with open(filename, 'wb') as f:
-                    pickle.dump(s_values[:n_iter], f)
+                    pickle.dump(sigma_trace[:n_iter], f)
 
             partial_txt = '_partial' if partial else ''
-            base_save_filename = f"con_hyp_S{n_sub}_{task}_embedding{partial_txt}"
+            set_sigma_txt = f"_sigma_set_{overwrite_sigma_val:.1f}" if overwrite_sigma_val is not None else ''
+            base_save_filename = f"con_hyp_S{n_sub}_{task}_embedding_{base_data_filename}{partial_txt}{set_sigma_txt}"
 
             if make_plot:
                 _z_positions = smc_embedding.particles['_z']
                 z_positions = lorentz_to_poincare(get_attribute_from_trace(_z_positions, get_det_params, 'z', shape=(n_particles, N, D+1)))
 
-                ## TODO: ADD LABELS!
                 ## TODO: what is the proper way to show the edges, there are 2 observations
                 # Plot posterior
                 plt.figure()
                 ax = plt.gca()
                 plot_posterior(z_positions,
-                               edges=obs[si, ti, 0, :],
+                               edges=np.mean(obs[si, ti], axis=0), # Average over 2 observations -> (M,)
                                pos_labels=plt_labels,
                                ax=ax,
                                title=f"Proposal S{n_sub} {task}",
                                hyperbolic=True,
+                               continuous=True,
                                bkst=True,
                                threshold=plot_threshold)
                 poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
                 ax.add_patch(poincare_disk)
                 # Save figure
                 savefile = get_filename_with_ext(base_save_filename, ext='png', partial=partial, folder=figure_folder)
-                plt.savefig(savefile)
+                plt.savefig(savefile, bbox_inches='tight')
                 plt.close()
 
             ## Save data
             embedding_filename = get_filename_with_ext(base_save_filename, partial=partial, bpf=bpf, folder=output_folder)
-            info_filename = get_filename_with_ext(f"con_hyp_S{n_sub}", ext='txt', folder=output_folder)
+            info_filename = get_filename_with_ext(f"con_hyp", ext='txt', folder=output_folder)
             with open(embedding_filename, 'wb') as f:
                 pickle.dump(smc_embedding, f)
             with open(info_filename, 'a') as f:
-                info_string = f"Task {task} took {end_time-start_time:.4f}sec ({n_iter} iterations) with lml={jnp.sum(lml):.4f}\n"
+                info_string = f"S{n_sub} Task {task} took {end_time-start_time:.4f}sec ({n_iter} iterations) with lml={jnp.sum(lml):.4f}\n"
                 f.write(info_string)
 
         # Add an empty line between each subject in the info file
@@ -563,6 +544,6 @@ if __name__ == "__main__":
 
     ## Save the new seed
     with open(seed_file, 'w') as f:
-        f.write(str(key[1]))
+        f.write(key2str(key))
     if do_print:
         print('Done')

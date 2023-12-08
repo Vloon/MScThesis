@@ -22,11 +22,11 @@ from continuous_hyperbolic_LSM import get_det_params as con_hyp_det_params, samp
 arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used, it overwrites the default filename
              ('-datfol', 'data_folder', str, 'Data'),  # folder where the data is stored
              ('-conbdf', 'con_base_data_filename', str, 'processed_data'), # the most basic version of the filename of the continuous saved data
-             ('-binbdf', 'bin_base_data_filename', str, 'binary_data'), # the most basic version of the filename of the binary saved data
-             ('-datath', 'data_threshold', float, 0.5),  # threshold for the binary data
+             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_max_0.05unconnected'), # the most basic version of the filename of the binary saved data
              ('-ef', 'embedding_folder', str, 'Embeddings'), # base input folder of the embeddings
              ('-ff', 'figure_folder', str, 'Figures/sanity_checks/posterior_predictive_checks'), # figure output folder
              ('-tf', 'task_filename', str, 'task_list'), # filename of the list of task names
+             ('-lab', 'label_location', str, 'Figures/lobelabels.npz'),  # file location of the labels
              ('-np', 'n_particles', int, 1000), # number of particles used in the embedding
              ('-nm', 'n_mcmc_steps', int, 100), # number of mcmc steps used in the embedding
              ('-N', 'N', int, 164), # number of nodes
@@ -34,6 +34,7 @@ arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used,
              ('-sn', 'subjectn', int, 25), # last subject to plot
              ('-et', 'edge_type', str, 'con'),  # edge type ('con' or 'bin')
              ('-geo', 'geometry', str, 'hyp'),  # LS geometry ('hyp' or 'euc')
+             ('-setsig', 'set_sigma', float, None), # value that sigma is set to (or None if learned)
              ('-nshuffle', 'n_shuffle', int, 100), # number of shuffles per particles to check for chance-level embedding
              ('-ebins', 'n_embedding_bins', int, 50), # number of bins in the embedding histogram
              ('-sbins', 'n_shuffle_bins', int, 1000), # number of bins in the shuddled histogram
@@ -47,17 +48,20 @@ arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used,
              ]
 
 global_params = get_cmd_params(arguments)
+set_GPU(global_params['gpu'])
 overwrite_data_filename = global_params['overwrite_data_filename']
 n_particles = global_params['n_particles']
 embedding_folder = f"{global_params['embedding_folder']}/{n_particles}p{global_params['n_mcmc_steps']}s"
 data_folder = global_params['data_folder']
 edge_type = global_params['edge_type']
 geometry = global_params['geometry']
-data_threshold = global_params['data_threshold']
+set_sigma = global_params['set_sigma']
+sigma_txt = f"_sigma_set_{set_sigma}" if set_sigma is not None else ''
 
-base_data_filename = f"{global_params['bin_base_data_filename']}_th{data_threshold:.2f}" if edge_type == 'bin' else global_params['con_base_data_filename']
+base_data_filename = global_params['bin_base_data_filename'] if edge_type == 'bin' else global_params['con_base_data_filename']
 figure_folder = get_safe_folder(f"{global_params['figure_folder']}/{edge_type}_{geometry}")
 task_filename = global_params['task_filename']
+label_location = global_params['label_location']
 N = global_params['N']
 M = N*(N-1)//2
 subject1 = global_params['subject1']
@@ -70,10 +74,9 @@ cmap = global_params['cmap']
 partial = global_params['partial']
 bpf = global_params['bpf']
 do_shuffle = global_params['do_shuffle']
-set_GPU(global_params['gpu'])
 
 ### JAX stuff
-key = jax.random.PRNGKey(global_params['seed'])
+key = jax.random.PRNGKey(global_params['seed'])    
 
 ### Get correct variables based on edge type and geometry
 det_params_dict = {'bin_euc':bin_euc_det_params,
@@ -88,6 +91,12 @@ sample_obs_dict = {'bin_euc':bin_euc_sample_observation,
 sample_obs_func = sample_obs_dict[f"{edge_type}_{geometry}"]
 
 latpos = '_z' if geometry == 'hyp' else 'z'
+
+# Load labels
+label_data = np.load(label_location)
+plt_labels = label_data[label_data.files[0]]
+if len(plt_labels) != N:
+    plt_labels = None
 
 def get_con_log_likelihood(i:int, log_likelihoods:ArrayLike, distances:ArrayLike, sigma_T_trace:ArrayLike, obs:ArrayLike) -> ArrayLike:
     """
@@ -117,7 +126,7 @@ def get_bin_log_likelihood(i:int, log_likelihoods:ArrayLike, distances:ArrayLike
     log_likelihoods = log_likelihoods.at[i].set(next_ll)
     return log_likelihoods
 
-def get_obs_samples(i:int, state:Tuple[PRNGKeyArray,ArrayLike], parameters:list, embedding:TemperedSMCState, sample_obs_func:Callable=sample_obs_func):
+def get_obs_samples(i:int, state:Tuple[PRNGKeyArray,ArrayLike], parameters:list, embedding:TemperedSMCState, set_sigma:float=set_sigma, sample_obs_func:Callable=sample_obs_func):
     """
     Returns a sampled observation, based on the given posterior (posterior predictive check). 
     PARAMS:
@@ -127,10 +136,13 @@ def get_obs_samples(i:int, state:Tuple[PRNGKeyArray,ArrayLike], parameters:list,
         predictions (n_particles, M) : prediced observations (to be filled in)
     parameters : list of parameters that need to be taken from the embedding (e.g. ['_z', 'sigma_beta_T])
     embeddding : posterior, containing latent positions and possibly sigma_beta_T
+    set_sigma : value to which sigma was set (or None)
     sample_obs_func : function to sample the observations
     """
     key, predictions = state
     posterior = {param:embedding.particles[param][i] for param in parameters}
+    if set_sigma is not None: 
+        posterior['sigma_beta_T'] = set_sigma
     key, pred = sample_obs_func(key, posterior)
     predictions = predictions.at[i].set(pred[0]) # Take first element because it's technically a 1,M array which doesn't fit in a M sized space
     return key, predictions
@@ -149,14 +161,40 @@ for si, n_sub in enumerate(range(subject1, subjectn+1)):
     for ti, task in enumerate(tasks):
         print(f"Running S{n_sub}, {task}")
         ### Load embedding and get distances
-        th_txt = f"_th{data_threshold:.2f}" if edge_type == 'bin' else ''
-        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding{th_txt}", folder=embedding_folder)
+        
+        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{base_data_filename}{sigma_txt}", partial, bpf, folder=embedding_folder)
         with open(embedding_filename, 'rb') as f:
             embedding = pickle.load(f)
 
+        distance_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd')  # -> (n_particles, M)
+
+        d_avg = np.mean(distance_trace, axis=0) # -> (M,)
+        d_avg = triu2mat(d_avg)
+
+        ### Sort distance matrix by lobe
+        lobes = [l[1].split(';')[0] for l in plt_labels]
+        idc = np.argsort(lobes)
+        d_sorted = np.zeros((N, N))
+        for row in range(N):
+            d_sorted[row] = d_avg[idc[row]][idc]
+
+        ordered = np.sort(lobes)
+        uordered = np.unique(ordered)
+        first_idc = [list(ordered).index(ul) for ul in uordered]
+
+        plt.figure()
+        plt.imshow(d_sorted, cmap=cmap)
+        plt.yticks(ticks=first_idc, labels=uordered)
+        plt.xticks(ticks=first_idc, labels=uordered, rotation=75)
+        ax = plt.gca()
+        ax.xaxis.tick_top()
+        plt.title(f"Distance matrix sorted by lobe\nS{n_sub} {task}")
+        savename = get_filename_with_ext(f"dist_matrix_by_lobe_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+        plt.savefig(savename, bbox_inches='tight')
+        plt.close()
+        
         ### Make shuffled distance distribution checks
         if do_shuffle:
-            distance_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd')  # -> (n_particles, M)
             sigma_T_trace = embedding.particles['sigma_beta_T'] if edge_type == 'con' else None
             embedding_log_likelihoods = jnp.zeros(n_particles)
             get_ll = lambda i, ll: ll_f(i,ll, distances=distance_trace, obs=obs[si, ti], sigma_T_trace=sigma_T_trace) ## Curry the observations, distance and sigma
@@ -182,13 +220,13 @@ for si, n_sub in enumerate(range(subject1, subjectn+1)):
             plt.title(f"S{n_sub} {task}")
             plt.legend()
             plt.tight_layout()
-            savename = get_filename_with_ext(f"emb_vs_shuf_loglikelihood_S{n_sub}_{task}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+            savename = get_filename_with_ext(f"emb_vs_shuf_loglikelihood_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
             plt.savefig(savename)
             plt.close()
 
         ### Make prior predictive check
         # Create data from embedding
-        parameters = [latpos, 'sigma_beta_T'] if edge_type == 'con' else [latpos]
+        parameters = [latpos, 'sigma_beta_T'] if edge_type == 'con' and set_sigma is None else [latpos]
         get_pred_func = lambda i, state: get_obs_samples(i, state, parameters, embedding)
         start = time.time()
         key, predictions = jax.lax.fori_loop(0, n_particles, get_pred_func, (key, jnp.zeros((n_particles, M)))) # love a good 4-stack
@@ -220,7 +258,7 @@ for si, n_sub in enumerate(range(subject1, subjectn+1)):
         plt.legend()
         plt.title(f"S{n_sub} {task} edges ordered by average edge weight")
         plt.tight_layout()
-        savename = get_filename_with_ext(f"{edge_type}_{geometry}_posterior_predictive_check_S{n_sub}_{task}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+        savename = get_filename_with_ext(f"{edge_type}_{geometry}_posterior_predictive_check_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
         plt.savefig(savename)
         plt.close()
 
@@ -235,7 +273,6 @@ for si, n_sub in enumerate(range(subject1, subjectn+1)):
         axs[1].set_title("Average predicted edge weight")
         axs[1].axis('off')
 
-        plt.tight_layout()
-        savename = get_filename_with_ext(f"{edge_type}_{geometry}_imshow_posterior_predictive_check_S{n_sub}_{task}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
-        plt.savefig(savename)
+        savename = get_filename_with_ext(f"{edge_type}_{geometry}_imshow_posterior_predictive_check_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+        plt.savefig(savename, bbox_inches='tight')
         plt.close()

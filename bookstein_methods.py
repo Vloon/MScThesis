@@ -7,7 +7,7 @@ from jax._src.typing import ArrayLike
 from blackjax.types import PyTree
 from blackjax.smc.tempered import TemperedSMCState
 from blackjax.mcmc.rmh import RMHState
-from typing import Callable, Union
+from typing import Callable, Union, Tuple
 
 def get_rigid_bookstein_anchors(n_dims:int = 2, offset:float = 0.3) -> jnp.ndarray:
     """
@@ -125,3 +125,47 @@ def add_bkst_to_smc_trace(trace:TemperedSMCState, bkst_dist:float, latpos:str='_
         _, new_particles = jax.lax.while_loop(cond, get_bkst, (0, new_particles))
         trace.particles[latpos] = new_particles
     return trace
+
+
+def smc_bkst_inference_loop(key: PRNGKeyArray, smc_kernel: Callable, initial_state: ArrayLike, max_iters: int=200) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]: ## <- klopt nie
+    """
+    Run the temepered SMC algorithm with Bookstein anchoring.
+
+    Run the adaptive algorithm until the tempering parameter lambda reaches the value lambda=1.
+    PARAMS:
+    key: random key for JAX functions
+    smc_kernel: kernel for the SMC particles
+    initial_state: beginning position of the algorithm
+    max_iters : maximum number of sigma iterations to save (if we save sigma at all)
+    """
+
+    if 'sigma_beta_T' in initial_state.particles:
+        n_particles = initial_state.particles['sigma_beta_T'].shape[0]
+        start_carry = (key, 0, 0., jnp.zeros((max_iters, n_particles, 1)), initial_state)
+
+        @jax.jit
+        def step(carry):
+            key, i, lml, sigma_trace, state = carry
+            key, subkey = jax.random.split(key)
+            state, info = smc_kernel(subkey, state)
+            sigma_trace = sigma_trace.at[i].set(state.particles['sigma_beta_T'])
+            lml += info.log_likelihood_increment
+            return key, i+1, lml, sigma_trace, state
+    else:
+        start_carry = (key, 0, 0., initial_state)
+
+        @jax.jit
+        def step(carry):
+            key, i, lml, state  = carry
+            key, subkey = jax.random.split(key)
+            state, info = smc_kernel(subkey, state)
+            lml += info.log_likelihood_increment
+            return key, i+1, lml, state
+        
+    cond = lambda carry: carry[-1].lmbda < 1
+        
+    results  = jax.lax.while_loop(cond, step, start_carry)
+
+    if results[1] > max_iters: # n_iter always stays in position 1
+        print(f"Warning! Embedding took {n_iter} iterations but max_iters is only {max_iters}! Not all proposals are saved.")
+    return results

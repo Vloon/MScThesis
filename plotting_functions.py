@@ -15,7 +15,14 @@ from blackjax.smc.tempered import TemperedSMCState
 
 from helper_functions import triu2mat, invlogit
 
-def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, linewidth:float=0.5, threshold:float=0.4) -> Axes:
+def plot_hyperbolic_edges(p:ArrayLike,
+                          A:ArrayLike,
+                          ax:Axes=None,
+                          R:float=1,
+                          linewidth:float=0.5,
+                          threshold:float=0.4,
+                          zorder:float=0,
+                          overwrt_alpha:float=None) -> Axes:
     """
     PARAMS
     p (N,2) : points on the Poincaré disk
@@ -24,6 +31,7 @@ def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, lin
     R : disk radius
     linewidth : linewidth of the edges
     threshold : minimum edge weight for the edge to be plotted
+    overwrt_alpha : overwrite the alpha value (can be used for binary edges to decrease the intensity)
     """
     def mirror(p:ArrayLike, R:float=1) -> ArrayLike:
         """
@@ -123,7 +131,8 @@ def plot_hyperbolic_edges(p:ArrayLike, A:ArrayLike, ax:Axes=None, R:float=1, lin
                 theta_q[m] = theta_q[m]%360
 
             # Draw arc
-            arc = Arc(xy=(cx[m], cy[m]), width=2*cR[m], height=2*cR[m], angle=0, theta1=min(theta_p[m],theta_q[m]), theta2=max(theta_p[m],theta_q[m]), linewidth=linewidth, alpha=A[m])
+            alpha = A[m] if overwrt_alpha is None else overwrt_alpha
+            arc = Arc(xy=(cx[m], cy[m]), width=2*cR[m], height=2*cR[m], angle=0, theta1=min(theta_p[m],theta_q[m]), theta2=max(theta_p[m],theta_q[m]), linewidth=linewidth, alpha=alpha, zorder=zorder)
             ax.add_patch(arc)
 
     return ax
@@ -132,8 +141,9 @@ def plot_euclidean_edges(p:ArrayLike,
                          A:ArrayLike,
                          ax:Axes=None,
                          linewidth:float=0.5,
-                         threshold:float=0.4
-                         ) -> Axes:
+                         threshold:float=0.4,
+                         zorder:float=0,
+                         overwrt_alpha:float=None) -> Axes:
     """
     Plots for all entries in A
     PARAMS:
@@ -142,6 +152,8 @@ def plot_euclidean_edges(p:ArrayLike,
     ax : axis to plot the network on
     linewidth : width of the edges
     threshold : minimum edge weight for the edge to be plotted
+    zorder : the z-order (depth) of the edges
+    overwrt_alpha : overwrite the alpha value (can be used for binary edges to decrease the intensity)
     """
     N, D = p.shape
     assert D == 2, f'Dimension must be 2 to be plotted, but is {D}.'
@@ -165,29 +177,176 @@ def plot_euclidean_edges(p:ArrayLike,
         
     for m in range(M):
         if A[m] >= threshold:
+            alpha = A[m] if overwrt_alpha is None else overwrt_alpha
             p1 = p[triu_indices[0][m], :]
             p2 = p[triu_indices[1][m], :]
             ax.plot([p1[0], p2[0]],
                     [p1[1], p2[1]],
                     color='k',
                     linewidth=linewidth, 
-                    alpha=A[m])
+                    alpha=alpha,
+                    zorder=zorder)
     return ax
 
-def plot_network(A:ArrayLike,
-                 pos:ArrayLike,
-                 pos_labels:ArrayLike=None,
-                 ax:Axes=None,
-                 title:str=None,
-                 node_color:list=None,
-                 node_size:list=None,
-                 edge_width:float=0.5,
-                 disk_radius:float=1.,
-                 hyperbolic:bool=False,
-                 continuous:bool=False,
-                 bkst:bool=True,
-                 threshold:float=0.4,
-                 margin:float=0.1
+def plot_posterior(pos_trace:ArrayLike,
+                   edges:ArrayLike=None,
+                   pos_labels:ArrayLike=None,
+                   ax:Axes=None,
+                   title:str=None,
+                   edge_width:float=0.5,
+                   disk_radius:float=1.,
+                   hyperbolic:bool=False,
+                   continuous:bool=False,
+                   bkst:bool=False,
+                   threshold:float=0,
+                   edge_alpha:float=None,
+                   edge_zorder:float=0,
+                   std_zorder:float=5,
+                   mean_zorder:float=10,
+                   max_th_digits:int=4,
+                   margin:float=0.1,
+                   s:float=10,
+                   alpha_margin:float=5e-3,
+                   marker_color:str='0.6',
+                   brainregion_cmap:str='jet',
+                   one_region:bool=True,
+                   hemisphere_symbols:ArrayLike=['+', 'x']) -> Axes:
+    """
+    Plots a network with the given positions.
+    PARAMS:
+    pos_trace : (n_steps, N, D+1) trace of the positions
+    edges : (M,) edge weight or binary edges between positions. If None, no edges are drawn.
+    pos_labels : (N,) list of labels for the nodes in the network. All labels should start with 'Left' or 'Right'
+    ax : axis to plot the network in
+    title : title to display
+    edge_width : width of the edges
+    disk_radius : the radius of the size of the plot
+    hyperbolic : whether the network should be plotted in hyperbolic space or Euclidean space
+    continuous : whether the edge weights are continuous or binary
+    bkst : whether to deal with the first two nodes as Bookstein nodes
+    threshold : minimum edge weight for the edge to be plotted
+    edge_alpha : alpha for plotting the binary edges to improve visibility
+    max_th_digits : maximum number of digits to show in the title for the threshold
+    margin : percentage of disk radius to be added as whitespace on the sides
+    s : point size for the scatter plot
+    alpha_margin : transparancy margin to ensure the most variable position does not have alpha=0.
+    marker_color : color for the position means markers
+    brainregion_cmap : cmap string to color the brain regions
+    one_region : whether to commit each brain region to one lobe only, rather than splitting certain nodes over multiple regions
+    hemisphere_symbols : list of plt marker symbols used for the different hemispheres
+    """
+    pos_trace = np.array(pos_trace) # Convert to Numpy, probably from JAX.Numpy
+    n_steps, N, D = pos_trace.shape
+    assert D == 2, f'Dimension must be 2 to be plotted, but is {D}. If plotting hyperbolic, convert to Poincaré coordinates beforehand.'
+    if pos_labels is not None:
+        pos_labels = np.array(pos_labels)
+        assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
+    M = N*(N-1)//2
+    if edges is not None:
+        edges = np.array(edges)
+        assert len(edges) == M, f'Length of edges must be {M} but is {len(edges)}'
+    clean_ax = True
+    if ax is None:
+        plt.figure(facecolor='w')
+        ax = plt.gca()
+        clean_ax = False
+    if pos_labels is not None: # Prep position labels
+        hemispheres = [lab[0] for lab in pos_labels]
+        brain_regions = [lab[1] for lab in pos_labels]
+        if one_region:
+            brain_regions = [br.split(';')[0] for br in brain_regions]
+        unique_hemis = list(np.unique(hemispheres))
+        unique_regions = list(np.unique(brain_regions))
+        ubr_colors = [plt.get_cmap(brainregion_cmap)(i) for i in np.linspace(0,1,len(unique_regions))]
+        br_colors = [ubr_colors[unique_regions.index(br)] for br in brain_regions]
+        assert len(unique_hemis) == len(hemisphere_symbols), f'Length of hemisphere_symbols should match unique number of hemispheres in the label file but they are {len(hemisphere_symbols)} and {len(unique_hemis)} respectively.'
+
+    margin = 1 + margin
+
+    pos_mean = np.mean(pos_trace, axis=0) # N,D average position
+    pos_std = np.std(pos_trace, axis=0) # N,D position standard deviation
+    pos_std_nml = pos_std/np.max(pos_std+alpha_margin) # Normalize so that the max standard deviation is just under 1 which then corresponds to most transparant point
+    
+    ### BOTTOM: Add edges
+    if edges is not None:
+        if hyperbolic:
+            if bkst:  # Add small jitter to Bookstein coordinates for plottability
+                pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
+            ax = plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold, zorder=edge_zorder, overwrt_alpha=edge_alpha)
+        else:
+            ax = plot_euclidean_edges(pos_mean, edges, ax, edge_width, threshold=threshold, zorder=edge_zorder, overwrt_alpha=edge_alpha)
+
+    ### MID: Plot standard deviations
+    ell_colors = br_colors if pos_labels is not None else ['r']*N
+    for n in range(N):
+        alpha = 1 - float(np.max(pos_std_nml[n,:]))
+        ell = Ellipse((pos_mean[n,0], pos_mean[n,1]), width=pos_std[n,0], height=pos_std[n,1], alpha=0.8, color=ell_colors[n], fill=True, zorder=std_zorder)
+        ax.add_patch(ell)
+
+    ### TOP: Plot node means
+    if pos_labels is not None: # Add position labels
+        coord = margin*disk_radius*10 # gewoon ver weg
+        marker_edgewidth = min(np.sqrt(s), s**2)/5 # edge width doesn't seem to visually scale linearly with the size of the marker, but we also need to deal with s < 1
+        s_lab = max(np.sqrt(s), s**2)*1.5
+        ## Create legend (the sizes are just purely vibes based, I don't understand why the markers are not consistent in size)
+        for i, hs in enumerate(unique_hemis):
+            ax.scatter(coord, coord,
+                       s=s_lab,
+                       marker=hemisphere_symbols[i],
+                       color=marker_color,
+                       label=hs,
+                       ) # Plot one invisible point per marker for plotting
+        for j, br in enumerate(unique_regions):
+            ax.scatter(coord, coord,
+                       s=s_lab,
+                       marker='o',
+                       color=ubr_colors[j],
+                       edgecolor='k',
+                       linewidth=marker_edgewidth,
+                       label=br,
+                       ) # Plot one invisible point per color for plotting
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5)
+        ## Plot the actual data
+        for n in range(N):
+            hs_idx = unique_hemis.index(pos_labels[n][0])
+            ax.scatter(x=pos_mean[n,0],
+                       y=pos_mean[n,1],
+                       s=s,
+                       marker=hemisphere_symbols[hs_idx],
+                       color=marker_color,
+                       linewidth=marker_edgewidth,
+                       zorder=mean_zorder,
+                       )
+    else: # Just plot the positions as default
+        if bkst:  # Make bookstein coordinates red
+            ax.scatter(pos_mean[:2, 0], pos_mean[:2, 1], c='r', s=s, zorder=mean_zorder)
+            ax.scatter(pos_mean[2:, 0], pos_mean[2:, 1], c='k', s=s, zorder=mean_zorder)
+        else:
+            ax.scatter(pos_mean[:, 0], pos_mean[:, 1], c='k', s=s, zorder=mean_zorder)
+
+    if title: # Both None and empty string will be False
+        if threshold > 0 and continuous:
+            thr_tit = round(threshold, max_th_digits) if len(str(threshold)) > max_th_digits else threshold
+            title = f"{title}\nthreshold = {thr_tit}"
+        ax.set_title(title, color='k', fontsize='24')
+    ax.set(xlim=(-margin*disk_radius,margin*disk_radius),ylim=(-margin*disk_radius,margin*disk_radius))
+    ax.axis('off')
+    return ax
+
+def plot_network(A: ArrayLike,
+                 pos: ArrayLike,
+                 pos_labels: ArrayLike = None,
+                 ax: Axes = None,
+                 title: str = None,
+                 node_color: list = None,
+                 node_size: list = None,
+                 edge_width: float = 0.5,
+                 disk_radius: float = 1.,
+                 hyperbolic: bool = False,
+                 continuous: bool = False,
+                 bkst: bool = True,
+                 threshold: float = 0.4,
+                 margin: float = 0.1
                  ) -> Axes:
     """
     Plots a network with the given positions.
@@ -210,7 +369,7 @@ def plot_network(A:ArrayLike,
     # Convert possibly jax numpy arrays to numpy arrays
     A = np.array(A)
     pos = np.array(pos)
-    
+
     if len(A.shape) == 1:
         A = triu2mat(A)
     N = A.shape[0]
@@ -218,7 +377,7 @@ def plot_network(A:ArrayLike,
     assert A.shape[1] == N and pos.shape[0] == N, f'Invalid shapes between obs: {A.shape} and pos: {pos.shape}'
     assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
     if node_color is None:
-        node_color = N*['k']
+        node_color = N * ['k']
         if bkst:
             node_color[:2] = 2 * ['r']
             node_color[2] = 'b'
@@ -229,139 +388,29 @@ def plot_network(A:ArrayLike,
         clean_ax = False
     if node_size is None:
         d = np.sum(A, axis=0)
-        node_size = [v**2/10 for v in d]
+        node_size = [v ** 2 / 10 for v in d]
 
     # Draw the nodes
-    ax.scatter(pos[:,0], pos[:,1],
+    ax.scatter(pos[:, 0], pos[:, 1],
                s=node_size,
                c=node_color,
-               linewidths=2.0 )
+               linewidths=2.0)
 
     if hyperbolic:
-        if bkst: # Add jitter to Bookstein coordinates to avoid dividing by zero
-            pos[:2,:] += np.random.normal(0, 1e-6, size=(2,2))
+        if bkst:  # Add jitter to Bookstein coordinates to avoid dividing by zero
+            pos[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
         ax = plot_hyperbolic_edges(p=pos, A=A, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
     else:
         ax = plot_euclidean_edges(p=pos, A=A, ax=ax, linewidth=edge_width)
 
     if title is not None:
         ax.set_title(title, color='k', fontsize='24')
-    margin = 1+margin
-    lim = (-margin*disk_radius, margin*disk_radius)
-    ax.set(xlim=lim,ylim=lim)
+    margin = 1 + margin
+    lim = (-margin * disk_radius, margin * disk_radius)
+    ax.set(xlim=lim, ylim=lim)
     ax.axis('off')
     if not clean_ax:
         plt.tight_layout()
-    return ax
-
-def plot_posterior(pos_trace:ArrayLike,
-                   edges:ArrayLike=None,
-                   pos_labels:ArrayLike=None,
-                   ax:Axes=None,
-                   title:str=None,
-                   edge_width:float=0.5,
-                   disk_radius:float=1.,
-                   hyperbolic:bool=False,
-                   continuous:bool=False,
-                   bkst:bool=False,
-                   threshold:float=0,
-                   max_th_digits:int=4,
-                   margin:float=0.1,
-                   s:float=0.5,
-                   alpha_margin:float=5e-3,
-                   marker_width:float=0.5,
-                   hemisphere_symbols:ArrayLike=['s', '^']) -> Axes:
-    """
-    Plots a network with the given positions.
-    PARAMS:
-    pos_trace : (n_steps, N, D+1) trace of the positions
-    edges : (M,) edge weight or binary edges between positions. If None, no edges are drawn.
-    pos_labels : (N,) list of labels for the nodes in the network. All labels should start with 'Left' or 'Right'
-    ax : axis to plot the network in
-    title : title to display
-    edge_width : width of the edges
-    disk_radius : the radius of the size of the plot
-    hyperbolic : whether the network should be plotted in hyperbolic space or Euclidean space
-    continuous : whether the edge weights are continuous or binary
-    bkst : whether to deal with the first two nodes as Bookstein nodes
-    threshold : minimum edge weight for the edge to be plotted
-    max_th_digits : maximum number of digits to show in the title for the threshold
-    margin : percentage of disk radius to be added as whitespace on the sides
-    s : point size for the scatter plot
-    alpha_margin : transparancy margin to ensure the most variable position does not have alpha=0.
-    marker_width : the width of the border around the marker
-    hemisphere_symbols : list of plt marker symbols used for the different hemispheres
-    """
-    pos_trace = np.array(pos_trace) # Convert to Numpy, probably from JAX.Numpy
-    n_steps, N, D = pos_trace.shape
-    assert D == 2, f'Dimension must be 2 to be plotted, but is {D}. If plotting hyperbolic, convert to Poincaré coordinates beforehand.'
-    if pos_labels is not None:
-        pos_labels = np.array(pos_labels)
-        assert len(pos_labels) == N, f'Length of pos_labels should be {N} but is {len(pos_labels)}'
-    M = N*(N-1)//2
-    if edges is not None:
-        edges = np.array(edges)
-        assert len(edges) == M, f'Length of edges must be {M} but is {len(edges)}'
-    clean_ax = True
-    if ax is None:
-        plt.figure(facecolor='w')
-        ax = plt.gca()
-        clean_ax = False
-
-    pos_mean = np.mean(pos_trace, axis=0) # N,D average position
-    pos_std = np.std(pos_trace, axis=0) # N,D position standard deviation
-    pos_std_nml = pos_std/np.max(pos_std+alpha_margin) # Normalize so that the max standard deviation is (just under) 1 (which then corresponds to most transparant point)
-    
-    ### BOTTOM: Add edges
-    if edges is not None:
-        if hyperbolic:
-            if bkst:  # Add small jitter to Bookstein coordinates for plottability
-                pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
-            ax = plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
-        else:
-            ax = plot_euclidean_edges(pos_mean, edges, ax, edge_width)
-
-    ### MID: Plot standard deviations
-    for n in range(N):
-        std = float(np.max(pos_std_nml[n,:]))
-        ell = Ellipse((pos_mean[n,0], pos_mean[n,1]), width=pos_std[n,0], height=pos_std[n,1], alpha=1-std, color='r', fill=True)
-        ax.add_patch(ell)
-
-    ### TOP: Plot node means
-    if pos_labels is not None: # Add position labels
-        hemispheres = [lab[0] for lab in pos_labels]
-        brain_region = [lab[1] for lab in pos_labels]
-        unique_hemis = np.unique(hemispheres)
-        unique_regions = np.unique(brain_region)
-        assert len(unique_hemis) == len(hemisphere_symbols), f'Length of hemisphere_symbols should match unique number of hemispheres but they are {len(hemisphere_symbols)} and {len(unique_hemis)} respectively.'
-        for i, hs in enumerate(unique_hemis):
-            ax.scatter(0, 0, c='k', marker=hemisphere_symbols[i], label=hs, linewidth=.5, alpha=0) # Plot one invisible point per marker for plotting
-        for j, br in enumerate(unique_regions):
-            ax.scatter(0, 0, marker='.', edgecolor='k', label=br, alpha=0)  # Plot one invisible point per color for plotting
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5)
-        # Now plot the actual data without labels
-        for i, hs in enumerate(unique_hemis):
-            for j, br in enumerate(brain_region):
-                ax.scatter(x=pos_mean[:,0],
-                            y=pos_mean[:,1],
-                            s=s,
-                            marker=hemisphere_symbols[i])
-    else: # Just plot the positions as default
-        if bkst:  # Make bookstein coordinates red
-            ax.scatter(pos_mean[:2, 0], pos_mean[:2, 1], c='r', s=s)
-            ax.scatter(pos_mean[2:, 0], pos_mean[2:, 1], c='k', s=s)
-        else:
-            ax.scatter(pos_mean[:, 0], pos_mean[:, 1], c='k', s=s)
-
-    if title: # Both None and empty string will be False
-        if threshold > 0:
-            thr_tit = round(threshold, max_th_digits) if len(str(threshold)) > max_th_digits else threshold
-            title = f"{title}\nthreshold = {thr_tit}"
-        ax.set_title(title, color='k', fontsize='24')
-    margin = 1+margin
-    ax.set(xlim=(-margin*disk_radius,margin*disk_radius),ylim=(-margin*disk_radius,margin*disk_radius))
-    ax.axis('off')
-    plt.tight_layout()
     return ax
 
 def plot_log_marginal_likelihoods(lml:ArrayLike, n_particles:ArrayLike, n_mcmc_steps:ArrayLike, ax:Axes=None):

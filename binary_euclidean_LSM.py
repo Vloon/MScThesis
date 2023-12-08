@@ -1,7 +1,7 @@
 # Home brew functions
 from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, \
-    get_attribute_from_trace, euclidean_distance
-from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace
+    get_attribute_from_trace, euclidean_distance, is_valid, get_plt_labels, key2str, print_versions
+from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace, smc_bkst_inference_loop
 from plotting_functions import plot_posterior, plot_network
 
 # Basics
@@ -30,27 +30,27 @@ from blackjax.smc.base import SMCInfo
 from typing import Callable, Tuple
 
 # Keep this here in case you somehow import the file and need these constants??
-eps = 1e-6
+eps = 1e-5 # If eps < 1e-5, rounding to zero can start to happen... DON'T TEMPT IT BOY!
 obs_eps = 1e-12
 mu = [0., 0.]
 sigma = 1.
 N = 164
 D = 2
 s1 = 1
-sn = 25
-n_particles = 1_000
-n_mcmc_steps = 100
+sn = 100
+n_particles = 2_000
+n_mcmc_steps = 500
 rmh_sigma = 1e-2
 bookstein_dist = 0.3
 data_folder = 'Data'
-base_data_filename = 'binary_data'
-data_threshold = 0.50
+base_data_filename = 'binary_data_downsampled_evenly_spaced_max_0.05unconnected'
 task_filename = 'task_list'
 base_output_folder = 'Embeddings'
 make_plot = False
 figure_folder = 'Figures'
 label_location = 'Figures/lobelabels.npz'
 r_margin = 0.1
+edge_alpha = 0.1
 do_print = False
 save_stats = False
 stats_filename = 'statistics'
@@ -77,13 +77,13 @@ if __name__ == "__main__":
                  ('-overwritedf', 'overwrite_data_filename', str, None),  # if used, it overwrites the default filename
                  ('-datfol', 'data_folder', str, data_folder),  # folder where the data is stored
                  ('-df', 'base_data_filename', str, base_data_filename),  # filename of the saved data
-                 ('-datath', 'data_threshold', float, data_threshold),  # threshold to be used for the HCP data
                  ('-tf', 'task_filename', str, task_filename),  # filename of the list of task names
                  ('-of', 'base_output_folder', str, base_output_folder),  # folder where to dump the LSM embeddings
                  ('--plot', 'make_plot', bool),  # whether to create a plot
                  ('-ff', 'figure_folder', str, figure_folder),  # base folder where to dump the figures
                  ('-lab', 'label_location', str, label_location),  # file location of the labels
                  ('-rmarg', 'r_margin', float, r_margin), # offset for the radius of the disk drawn around the positions
+                 ('-ealpha', 'edge_alpha', float, edge_alpha), # alpha for plotting the binary edges to improve visibility
                  ('--print', 'do_print', bool),  # whether to print cute info
                  ('--stats', 'save_stats', bool),  # whether to save the statistics in a csv
                  ('--partial', 'partial', bool),  # whether to use partial correlations
@@ -99,6 +99,7 @@ if __name__ == "__main__":
 
     # Get arguments from CMD
     global_params = get_cmd_params(arguments)
+    set_GPU(global_params['gpu']) ### MUST BE RUN FIRST!
     eps = global_params['eps']
     obs_eps = global_params['obs_eps']
     mu = global_params['mu']
@@ -116,12 +117,12 @@ if __name__ == "__main__":
     overwrite_data_filename = global_params['overwrite_data_filename']
     base_data_filename = global_params['base_data_filename']
     task_filename = global_params['task_filename']
-    data_threshold = global_params['data_threshold']
     output_folder = get_safe_folder(f"{global_params['base_output_folder']}/{n_particles}p{n_mcmc_steps}s")
     make_plot = global_params['make_plot']
     figure_folder = get_safe_folder(f"{global_params['figure_folder']}/{n_particles}p{n_mcmc_steps}s")
     label_location = global_params['label_location']
     r_margin = global_params['r_margin']
+    edge_alpha = global_params['edge_alpha']
     do_print = global_params['do_print']
     save_stats = global_params['save_stats']
     partial = global_params['partial']
@@ -132,18 +133,15 @@ if __name__ == "__main__":
     dl = global_params['dl']
     seed_file = global_params['seed_file']
     seed = global_params['seed']
-    set_GPU(global_params['gpu'])
 
-    # Initialize JAX stuff
     if do_print:
-        print('Using blackjax version', bjx.__version__)
-        print(f'Running on {jax.devices()}')
+        print_versions()
+        
     if seed is None:
         with open(seed_file, 'r') as f:
             seed = int(f.read())
     key = jax.random.PRNGKey(seed)
 
-    # ONLY NOW TURN MU INTO JNP ARRAY, OTHERWISE JAX WILL F*** WITH THE GPUs THE WRONG WAY!!
     mu = jnp.array(mu)
 
 ## Define functions to calculate the continuous hyperbolic parameters
@@ -152,21 +150,17 @@ def get_det_params(z:ArrayLike, eps:float=eps, **kwargs) -> dict:
     Calculates all parameters based on z, and returns those in a dictionary.
     PARAMS:
     z : positions on the Euclidean plane 
-    eps : offset for calculating d_norm, to insure max(d_norm) < 1
-    **kwargs allows us to pass non-used parameters, which is handy when we want to allow other files to use the con hyp model but also others and allow this function to just catch the parameters it needs
+    eps : offset for calculating p, to insure 0 < p < 1
+    **kwargs allows us to pass non-used parameters, which is handy when we want to allow other files to use the bin euc model but also others and allow this function to just catch the parameters it needs
     """ 
     N = z.shape[0]
     triu_indices = jnp.triu_indices(N, k=1)
 
     d = euclidean_distance(z)[triu_indices]
-    # d_norm = d/(jnp.max(d)+eps)
-
-    # p = 1-d_norm
     p = jnp.clip(jnp.exp(-d**2), eps, 1-eps)
 
     params = {'z':z,
               'd':d,
-              # 'd_norm':d_norm,
               'p':p}
     return params
 
@@ -183,8 +177,6 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, mu:float = mu, sigma:float = sig
     eps : offset for calculating d_norm, to insure max(d_norm) < 1
     """
     mu = jnp.array(mu)
-    N = shape[0]
-    M = N * (N - 1) // 2
 
     # Sample positions and temp
     key, z_key = jax.random.split(key, num=2)
@@ -210,7 +202,7 @@ def sample_observation(key:PRNGKeyArray, prior:dict, n_samples:int=1, eps:float=
     params = get_det_params(z, eps=eps)
     p = params['p']
 
-    # Sample A
+    # Sample Y
     key, subkey = jax.random.split(key)
     Y = jax.random.bernoulli(subkey, p, shape=(n_samples, M))
 
@@ -311,7 +303,7 @@ def initialize_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, mu:fl
     mu : mean of the 2D Gaussian to sample p
     sigma : standard deviation of the 2D Gaussian to sample p
     """
-    z_key, key = jax.random.split(key)
+    key, z_key = jax.random.split(key)
     initial_position = {'z': sigma*jax.random.normal(z_key, shape=(num_particles, N, D))+mu}
     return key, initial_position
 
@@ -327,39 +319,11 @@ def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, 
     bookstein_dist : offset of the first Bookstein anchor
     """
     N, D = shape
-    z_key, z_bx_key, key = jax.random.split(key, 3)
-    initial_position = {'z': smc_bookstein_position(sigma * jax.random.normal(z_key, shape=(num_particles, N - D, D)) + mu),
-                        'zb_x': sigma*jax.random.truncated_normal(z_bx_key, lower=-bookstein_dist, upper=jnp.inf, shape=(num_particles,1)), # Second node is restricted to just an x-position.
-                        } # N-D to skip first D bkst nodes (they are implicit)
+    key, z_key, zb_x_key = jax.random.split(key, 3)
+    initial_position = {'z': smc_bookstein_position(sigma * jax.random.normal(z_key, shape=(num_particles, N - D, D)) + mu), # non-bkst nodes
+                        'zb_x': sigma*jax.random.truncated_normal(zb_x_key, lower=-bookstein_dist, upper=jnp.inf, shape=(num_particles,1)), # Second node is restricted to just a free x-position. with y=0.
+                        }
     return key, initial_position
-
-def smc_bkst_inference_loop(key:PRNGKeyArray, smc_kernel:Callable, initial_state:ArrayLike) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]:
-    """
-    Run the temepered SMC algorithm with Bookstein anchoring.
-
-    Run the adaptive algorithm until the tempering parameter lambda reaches the value lambda=1.
-    PARAMS:
-    key: random key for JAX functions
-    smc_kernel: kernel for the SMC particles
-    initial_state: beginning position of the algorithm
-    """
-    def cond(carry):
-        state = carry[2]
-        return state.lmbda < 1
-
-    @jax.jit
-    def step(carry):
-        i, lml, state, key = carry
-        key, subkey = jax.random.split(key)
-        state, info = smc_kernel(subkey, state)
-        lml += info.log_likelihood_increment
-        return i+1, lml, state, key
-
-    n_iter, lml, final_state, key = jax.lax.while_loop(
-        cond, step, (0, 0., initial_state, key)
-    )
-
-    return key, n_iter, lml, final_state
 
 def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int = N, D:int = D, rmh_sigma:float = rmh_sigma, n_mcmc_steps:int = n_mcmc_steps, n_particles:int = n_particles) -> Tuple[PRNGKeyArray, float, TemperedSMCState]:
     """
@@ -378,7 +342,8 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int = N, D:int = D, rmh
     _bookstein_log_prior = lambda state: bookstein_log_prior(**state)  # Parameters are taken from global parameters
     _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs)  # Parameters are taken from global parameters
 
-    rmh_parameters = {'sigma': rmh_sigma * jnp.eye((N - D) * D + 1)} # +1 for the x-coordinate of the 2nd bookstein anchor
+    n_vars = (N - D) * D + 1 # (N-D) D-dimensional positions +1 for the x-coordinate of the 2nd bookstein anchor
+    rmh_parameters = {'sigma': rmh_sigma * jnp.eye(n_vars)}
     smc = bjx.adaptive_tempered_smc(
         logprior_fn=_bookstein_log_prior,
         loglikelihood_fn=_bookstein_log_likelihood,
@@ -404,23 +369,17 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int = N, D:int = D, rmh
 
 if __name__ == "__main__":
     """
-    Data is in a dictionary. The keys are defined by "S{n_sub}_{task}_{enc}", e.g. "S1_EMOTION_RL".
-    The values per key are the upper triangle of the correlation matrix (length M list).
+    The data is in a dictionary. The keys are defined by "S{n_sub}_{task}_{enc}", e.g. "S1_EMOTION_RL". The values per key 
+    are the upper triangle of the correlation matrix (length M list). We load these into a array of (n_subjects, n_tasks, n_encs, M). 
     We go through each subject/task, and take both encodings as seperate observations to create 1 embedding.
     """
 
     # Load labels
-    if make_plot and not no_labels:
-        label_data = np.load(label_location)
-        plt_labels = label_data[label_data.files[0]]
-        if len(plt_labels) is not N:
-            plt_labels = None
-    else:
-        plt_labels = None
+    plt_labels = get_plt_labels(label_location, make_plot, no_labels, N)
 
     # Load data
     if not overwrite_data_filename:
-        data_filename = get_filename_with_ext(f"{base_data_filename}_th{data_threshold:.2f}", partial, bpf, folder=data_folder)
+        data_filename = get_filename_with_ext(base_data_filename, partial, bpf, folder=data_folder)
     else:
         data_filename = overwrite_data_filename
     task_filename = get_filename_with_ext(task_filename, ext='txt', folder=data_folder)
@@ -444,24 +403,24 @@ if __name__ == "__main__":
                     writer.writerow(stats_row)
 
             partial_txt = '_partial' if partial else ''
-            base_save_filename = f"bin_euc_S{n_sub}_{task}_embedding_th{data_threshold:.2f}{partial_txt}"
+            base_save_filename = f"bin_euc_S{n_sub}_{task}_embedding_{base_data_filename}{partial_txt}"
 
             if make_plot:
                 z_positions = smc_embedding.particles['z']
                 radii = jnp.sqrt(jnp.sum(z_positions**2, axis=2))
                 max_r = jnp.max(radii)
 
-                ## TODO: ADD LABELS!
                 # Plot posterior
                 plt.figure()
                 ax = plt.gca()
                 plot_posterior(z_positions,
-                               edges=obs[si, ti, 0], # Dit is ook nog raar!
+                               edges=np.mean(obs[si, ti], axis=0), # Average over the 2 observations -> (M,)
                                pos_labels=plt_labels,
                                ax=ax,
                                title=f"Posterior S{n_sub} {task}",
                                hyperbolic=False,
                                bkst=True,
+                               edge_alpha=edge_alpha,
                                disk_radius=max_r,
                                margin=r_margin,
                                )
@@ -469,16 +428,16 @@ if __name__ == "__main__":
                 ax.add_patch(poincare_disk)
                 # Save figure
                 savefile = get_filename_with_ext(base_save_filename, ext='png', folder=figure_folder)
-                plt.savefig(savefile)
+                plt.savefig(savefile, bbox_inches='tight')
                 plt.close()
 
             # Save data
             embedding_filename = get_filename_with_ext(base_save_filename, partial=partial, bpf=bpf, folder=output_folder)
-            info_filename = get_filename_with_ext(f"bin_euc_S{n_sub}", ext='txt', folder=output_folder)
+            info_filename = get_filename_with_ext(f"bin_euc", ext='txt', folder=output_folder)
             with open(embedding_filename, 'wb') as f:
                 pickle.dump(smc_embedding, f)
             with open(info_filename, 'a') as f:
-                info_string = f'Task {task} at threshold {data_threshold} took {end_time - start_time:.4f}sec ({n_iter} iterations) with lml={jnp.sum(lml):.4f}\n'
+                info_string = f'S{n_sub} Task {task} for {base_data_filename} took {end_time - start_time:.4f}sec ({n_iter} iterations) with lml={jnp.sum(lml):.4f}\n'
                 f.write(info_string)
 
         # Add an empty line between each subject in the info file
@@ -487,6 +446,6 @@ if __name__ == "__main__":
     
     ## Save the new seed
     with open(seed_file, 'w') as f:
-        f.write(str(key[1]))
+        f.write(key2str(key))
     if do_print:
         print('Done')

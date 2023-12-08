@@ -1,16 +1,21 @@
 import numpy as np
-import pickle
-from helper_functions import get_cmd_params, set_GPU, is_valid, get_filename_with_ext, get_safe_folder, load_observations, triu2mat
-import os
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import pickle
+import os
+import jax
+import jax.numpy as jnp
+
+from typing import Tuple
+from jax._src.typing import ArrayLike
+
+from helper_functions import get_cmd_params, set_GPU, is_valid, get_filename_with_ext, get_safe_folder, load_observations, triu2mat
 
 # Create cmd argument list (arg_name, var_name, type, default, nargs[OPT])
 arguments = [('-s1', 'subject1', int, 1), # first subject
              ('-sn', 'subjectn', int, 100),  # last subject
              ('-df', 'data_folder', str, 'Data'), # path to get to the data
              ('-tf', 'task_file', str, 'task_list'), # task list name WITHOUT EXTENTION
-             ('-if', 'input_file', str, 'processed_data'), # filename of the processed data WITHOUT EXTENTION
+             ('-if', 'input_file', str, 'processed_data_downsampled_evenly_spaced'), # filename of the processed data WITHOUT EXTENTION
              ('-of', 'output_file', str, 'binary_data'), # filename to save the binary data WITHOUT EXTENTION
              ('-minth', 'min_threshold', float, 1e-2), # minimum threshold to try
              ('-maxth', 'max_threshold', float, 1-1e-2), # maximum threshold to try (inlcuded)
@@ -21,13 +26,20 @@ arguments = [('-s1', 'subject1', int, 1), # first subject
              ('--print', 'do_print', bool), # whether to print cute info
              ('--plot', 'make_plot', bool), # whether to make plots
              ('-ff', 'figure_folder', str, 'Figures/binary_data_distribution'),  # base folder where to dump the figures
-             ('-nbins', 'n_bins', int, 20), # number of bins for the log-log degree distribution plot
+             ('-infofile', 'info_filename', str, 'binary_info'), # filename of the info file
+             ('-method', 'method', str, 'max_unconnected'), # Method to threshold the data. 'set_th' uses the same set threshold for each sub/task, 'top_edges' uses the top % edges, 'max_unconnected' leaves at most 1-% nodes unconnected
+             ('-pedges', 'percent_edges', float, 0.95), # Percentage of edges that are included when using 'top_edges' method, or 1-percent_edges is used as maximum in 'max_unconnected'
+             ('-nbins', 'n_bins', int, 100), # number of bins for the log-log degree distribution plot
              ('-palpha', 'plot_alpha', float, .6), # alpha for plotting stuff
+             ('-cmap', 'cmap', str, 'bwr'), # cmap for plotting
              ('-gpu', 'gpu', str, ''), # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
+valid_methods = ['set_th', 'top_edges', 'max_unconnected']
+
 # Get arguments from CMD
 global_params = get_cmd_params(arguments)
+set_GPU(global_params['gpu'])
 subject1 = global_params['subject1']
 subjectn = global_params['subjectn']
 assert subject1 <= subjectn, f"Subject 1 must be smaller than subject n but they are {subject1} and {subjectn} respectively."
@@ -35,8 +47,7 @@ data_folder = global_params['data_folder']
 partial = global_params['partial']
 bpf = global_params['bpf']
 task_filename = get_filename_with_ext(global_params['task_file'], ext='txt', folder=data_folder)
-input_file = global_params['input_file']
-data_filename = get_filename_with_ext(input_file, partial, bpf, folder=data_folder)
+data_filename = get_filename_with_ext(global_params['input_file'], partial, bpf, folder=data_folder)
 min_threshold = global_params['min_threshold']
 max_threshold = global_params['max_threshold']
 n_thresholds = global_params['n_thresholds']
@@ -46,21 +57,32 @@ output_file = global_params['output_file']
 do_print = global_params['do_print']
 make_plot = global_params['make_plot']
 figure_folder = get_safe_folder(global_params['figure_folder'])
+info_filename = get_filename_with_ext(global_params['info_filename'], ext='txt', folder=data_folder)
+method = global_params['method']
+assert method in valid_methods, f"method should be in {valid_methods} but is {method}"
+percent_edges = global_params['percent_edges']
+n_included = int(np.ceil(M*percent_edges)) # We want at least percent_edge, hence ceiling (ceil keeps it a float, hence int)
 n_bins = global_params['n_bins']
 plot_alpha = global_params['plot_alpha']
-set_GPU(global_params['gpu'])
+cmap = global_params['cmap']
 
 ## Load continuous data
 con_obs, tasks, encs = load_observations(data_filename, task_filename, subject1, subjectn, M)
 subjects = range(subject1, subjectn + 1)
 
+n_scans = len(subjects) * len(tasks) * len(encs)
+
+x_offset = 0.5
+n_x_vals = len(subjects) * len(tasks)
+x_tick_interval = max(n_x_vals//10, 1)
+hcolor = [plt.get_cmap(cmap)(i) for i in np.linspace(0, 1, len(encs))]
+
 def get_i(si:int, ti:int, ei:int, T:int=len(tasks), E:int=len(encs)) -> int:
     """
     Returns the flattened index based on subject, task, encoding indices
+    im lazy
     """
     return si * T * E + ti * E + ei 
-
-n_scans = len(subjects) * len(tasks) * len(encs)
 
 ## Create correlation range plot
 if make_plot:
@@ -86,47 +108,207 @@ if make_plot:
     plt.savefig(savename)
     plt.close()
 
-thresholds = np.linspace(min_threshold, max_threshold, n_thresholds)
-nodes_excluded = np.zeros((n_thresholds, n_scans))
+if method == 'set_th':
+    thresholds = np.linspace(min_threshold, max_threshold, n_thresholds)
+    nodes_excluded = np.zeros((n_thresholds, n_scans))
 
-for thi, threshold in enumerate(thresholds):
-    if do_print:
-       print(f"Binarizing at theta={threshold}")
-    ### TODO: Number of digits dependent on the thresholds
-    bin_filename = get_filename_with_ext(f"{output_file}_th{threshold:.2f}", partial=partial, folder=data_folder)
+    for thi, threshold in enumerate(thresholds):
+        if do_print:
+           print(f"Binarizing at theta={threshold}")
+        ### TODO: Number of digits dependent on the thresholds or something smart there
+        bin_filename = get_filename_with_ext(f"{output_file}_th{threshold:.2f}", partial=partial, folder=data_folder)
+        bin_data = {}
+        ## Create binary observations matrix
+        for si, n_sub in enumerate(subjects):
+            for ti, task in enumerate(tasks):
+                for ei, enc in enumerate(encs):
+                    dict_key = f"S{n_sub}_{task}_{enc}"
+                    bin_data[dict_key] = con_obs[si, ti, ei, :] > threshold
+
+                    degree = np.sum(triu2mat(bin_data[dict_key]), axis=1)
+                    nodes_excluded[thi, get_i(si, ti, ei)] = np.sum(degree == 0)
+
+                    ## Plot log-log degree distribution ### HOW MANY BINS???
+                    if make_plot:
+                        degree_hist, degree_bins = jnp.histogram(degree, bins=n_bins, density=True)
+                        plot_position = (degree_bins[1:] + degree_bins[:-1]) / 2 # Plot in the middle of the bin
+                        plt.plot(plot_position, degree_hist, color='k')
+                        plt.xscale('log')
+                        plt.yscale('log')
+                        plt.xlabel('degree')
+                        plt.ylabel('density')
+                        savename = get_filename_with_ext(f"{dict_key}_degree_dist_th{threshold:.2f}", partial=partial, ext='png', folder=figure_folder)
+                        plt.savefig(savename)
+                        plt.close()
+
+        ## Save binarized data
+        with open(bin_filename, 'wb') as f:
+            pickle.dump(bin_data, f)
+        if do_print:
+            print(f"Saved data at {bin_filename}")
+
+    if make_plot:
+        plt.figure()
+        for thi, threshold in enumerate(thresholds):
+            plt.scatter(np.repeat(threshold, n_scans), 1-nodes_excluded[thi]/N, c='k', s=1, alpha=plot_alpha)
+        offset = .05
+        plt.hlines(percent_edges, min_threshold-offset, max_threshold+offset, color='r', linestyle='dashed')
+        plt.xlabel('Threshold')
+        plt.ylabel('Percentage nodes included')
+        savename = get_filename_with_ext(f"nodes_included", partial=partial, ext='png', folder=figure_folder)
+        plt.savefig(savename)
+        plt.close()
+elif method == 'top_edges':
+    degree_dist = np.zeros((len(subjects),len(tasks),len(encs), N))
+    bin_filename = get_filename_with_ext(f"{output_file}_{percent_edges:.2f}percent_edges", partial=partial, folder=data_folder)
     bin_data = {}
-    ## Create binary observations matrix
     for si, n_sub in enumerate(subjects):
         for ti, task in enumerate(tasks):
             for ei, enc in enumerate(encs):
                 dict_key = f"S{n_sub}_{task}_{enc}"
-                bin_data[dict_key] = con_obs[si, ti, ei, :] > threshold
+                edge_idc = np.argsort(con_obs[si, ti, ei, :])[::-1][:n_included] # Sort highest to lowest, then take the first n_included indices to be edges
+                bin_obs = np.zeros((M,))
+                bin_obs[edge_idc] = 1
+                bin_data[dict_key] = bin_obs
 
                 degree = np.sum(triu2mat(bin_data[dict_key]), axis=1)
-                nodes_excluded[thi, get_i(si, ti, ei)] = np.sum(degree == 0)
+                degree_dist[si, ti, ei] = degree
 
-                ## Plot log-log degree distribution ### HOW MANY BINS???
                 if make_plot:
                     degree_hist, degree_bins = jnp.histogram(degree, bins=n_bins, density=True)
-                    plot_position = (degree_bins[1:] + degree_bins[:-1]) / 2 # Plot in the middle of the bin
+                    plot_position = (degree_bins[1:] + degree_bins[:-1]) / 2  # Plot in the middle of the bin
                     plt.plot(plot_position, degree_hist, color='k')
                     plt.xscale('log')
                     plt.yscale('log')
-                    savename = get_filename_with_ext(f"degree_dist_th{threshold:.2f}", partial=partial, ext='png', folder=figure_folder)
+                    plt.xlabel('degree')
+                    plt.ylabel('density')
+                    savename = get_filename_with_ext(f"{dict_key}_degree_dist_top_{percent_edges:.2f}_edges", partial=partial, ext='png', folder=figure_folder)
                     plt.savefig(savename)
                     plt.close()
 
     ## Save binarized data
     with open(bin_filename, 'wb') as f:
         pickle.dump(bin_data, f)
+    if do_print:
+        print(f"Saved data at {bin_filename}")
 
-plt.figure()
-for thi, threshold in enumerate(thresholds):
-    plt.scatter(np.repeat(threshold, n_scans), 1-nodes_excluded[thi]/N, c='k', s=1, alpha=plot_alpha)
-offset = .05
-plt.hlines(.95, min_threshold-offset, max_threshold+offset, color='r', linestyle='dashed')
-plt.xlabel('Threshold')
-plt.ylabel('Percentage nodes included')
-savename = get_filename_with_ext(f"nodes_included", partial=partial, ext='png', folder=figure_folder)
-plt.savefig(savename)
-plt.close()
+    if make_plot:
+        plt.figure(figsize=(20,12))
+        for si, n_sub in enumerate(subjects):
+            for ti, task in enumerate(tasks):
+                x_coord = (si*len(tasks) + ti) * (1 + x_offset)
+                for ei, enc in enumerate(encs):
+                    degree_hist, degree_bins = jnp.histogram(degree_dist[si, ti, ei], bins=n_bins, density=True)
+                    degree_hist = degree_hist/jnp.max(degree_hist) # Normalize so the peak is at 1
+                    st = plt.stairs(degree_hist + x_coord, degree_bins, baseline=x_coord, fill=True, orientation='horizontal', color=hcolor[ei], alpha=plot_alpha)
+                    if si == 0 and ti == 0:
+                        st.set(label=f"scan {enc}")
+        plt.legend()
+        plt.xticks(ticks=[it * (1 + x_offset) for it in range(n_x_vals)][::x_tick_interval], labels=np.arange(n_x_vals)[::x_tick_interval])
+        xmin, xmax = 0, n_x_vals * (1 + x_offset)
+        plt.xlim(xmin, xmax)
+        plt.xlabel('Subject/task')
+        plt.ylabel('Degree')
+        plt.tight_layout()
+        savename = get_filename_with_ext(f"degree_dists_top_{percent_edges:.2f}_edges", partial=partial, ext='png', folder=figure_folder)
+        plt.savefig(savename)
+        plt.close()
+elif method == 'max_unconnected':
+    ## Iets van er mogen maar x% nodes unconnected raken, maar dan daarbinnen zo sparse mogelijk (is denk ik effe zoekwerk)
+
+    def cond(state) -> bool:
+        """
+        PARAMS:
+        state
+            th_idx : index of the ordered threshold
+            degree : (N,) degree distribution given the threshold
+        """
+        _, degree = state
+        return jnp.sum(degree==0)/N < 1-percent_edges
+
+    def get_degree_dist(state:Tuple[int, ArrayLike], obs:ArrayLike, sorted_idc:ArrayLike) -> Tuple[int, ArrayLike]:
+        """
+        Returns the threshold's index in the sorted list and the degree distribution of the binary network
+        PARAMS:
+        state
+            th_idx : index of the ordered threshold
+            degree : (N,) degree distribution given the threshold
+        obs : (M,) continuous observation
+        sorted_idc : (M,) indices of the sorted observation
+        """
+        th_idx, _ = state
+        threshold = obs[sorted_idc[th_idx]]
+        bin_obs = obs > threshold
+        degree = jnp.sum(triu2mat(bin_obs), axis=1)
+        return th_idx+1, degree
+
+    degree_dist = np.zeros((len(subjects),len(tasks),len(encs), N))
+    bin_filename = get_filename_with_ext(f"{output_file}_max_{1-percent_edges:.2f}unconnected", partial=partial, folder=data_folder)
+    bin_data = {}
+    for si, n_sub in enumerate(subjects):
+        for ti, task in enumerate(tasks):
+            for ei, enc in enumerate(encs):
+                dict_key = f"S{n_sub}_{task}_{enc}"
+
+                ### Increases the threshold to the next highest edge value one by one, until more than 5% of the nodes are unconnected.
+                ### The while loop runs until degree is too low, which means th_idx is one more than we want, but we also return th_idx + 1, so it's 2 too high.
+                this_obs = jnp.array(con_obs[si, ti, ei, :])
+                sorted_idc = jnp.argsort(this_obs)
+                get_degree_dist_func = lambda state: get_degree_dist(state, obs=this_obs, sorted_idc=sorted_idc)
+                th_idx_plus_two, _ = jax.lax.while_loop(cond, get_degree_dist_func, (0, jnp.ones(N)))
+
+                threshold = this_obs[sorted_idc[th_idx_plus_two - 2]]
+                bin_obs = this_obs > threshold
+
+                bin_data[dict_key] = bin_obs
+
+                degree = jnp.sum(triu2mat(bin_obs), axis=1)
+                degree_dist[si, ti, ei] = degree
+
+                info_string = f"{dict_key} has threshold {threshold:.4f} which leaves {100 * jnp.sum(degree == 0) / N:.2f}% unconnected"
+                with open(info_filename, 'a') as f:
+                    f.write(f"{info_string}\n")
+                if do_print:
+                    print(info_string)
+
+                if make_plot:
+                    degree_hist, degree_bins = jnp.histogram(degree, bins=n_bins, density=True)
+                    plot_position = (degree_bins[1:] + degree_bins[:-1]) / 2  # Plot in the middle of the bin
+                    plt.plot(plot_position, degree_hist, color='k')
+                    plt.xscale('log')
+                    plt.yscale('log')
+                    plt.xlabel('degree')
+                    plt.ylabel('density')
+                    savename = get_filename_with_ext(f"{dict_key}_degree_dist_max_{1-percent_edges:.2f}_unconnected", partial=partial, ext='png', folder=figure_folder)
+                    plt.savefig(savename)
+                    plt.close()
+
+    with open(info_filename, 'a') as f:
+        f.write('\n')
+    ## Save binarized data
+    with open(bin_filename, 'wb') as f:
+        pickle.dump(bin_data, f)
+    if do_print:
+        print(f"Saved data at {bin_filename}")
+
+    if make_plot:
+        plt.figure(figsize=(20,12))
+        for si, n_sub in enumerate(subjects):
+            for ti, task in enumerate(tasks):
+                x_coord = (si*len(tasks) + ti) * (1 + x_offset)
+                for ei, enc in enumerate(encs):
+                    degree_hist, degree_bins = jnp.histogram(degree_dist[si, ti, ei], bins=n_bins, density=True)
+                    degree_hist = degree_hist/jnp.max(degree_hist) # Normalize so the peak is at 1
+                    st = plt.stairs(degree_hist + x_coord, degree_bins, baseline=x_coord, fill=True, orientation='horizontal', color=hcolor[ei], alpha=plot_alpha)
+                    if si == 0 and ti == 0:
+                        st.set(label=f"scan {enc}")
+        plt.legend()
+        plt.xticks(ticks=[it * (1 + x_offset) for it in range(n_x_vals)][::x_tick_interval], labels=np.arange(n_x_vals)[::x_tick_interval])
+        xmin, xmax = 0, n_x_vals * (1 + x_offset)
+        plt.xlim(xmin, xmax)
+        plt.xlabel('Subject/task')
+        plt.ylabel('Degree')
+        plt.tight_layout()
+        savename = get_filename_with_ext(f"degree_dists_max_{1-percent_edges:.2f}_unconnected", partial=partial, ext='png', folder=figure_folder)
+        plt.savefig(savename)
+        plt.close()
