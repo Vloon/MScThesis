@@ -194,8 +194,6 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float = sigma, eps:float =
     sigma : standard deviation of the 2D Gaussian to sample p
     eps : offset for calculating d_norm, to insure max(d_norm) < 1
     """
-    mu = jnp.array(mu)
-
     # Sample positions and temp
     key, _z_key, = jax.random.split(key)
     prior = {'_z' : sigma * jax.random.normal(_z_key, shape=shape)} # Is always centered at 0

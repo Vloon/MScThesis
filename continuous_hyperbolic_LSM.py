@@ -1,13 +1,14 @@
 # Home brew functions
 from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, get_attribute_from_trace, \
     logit, invlogit, lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map, is_valid, get_plt_labels, print_versions, \
-    key2str
+    key2str, triu2mat
 from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace, smc_bkst_inference_loop
 from plotting_functions import plot_posterior, plot_network
 
 # Basics
 import pickle
 import time
+import sys
 import os
 import csv
 import numpy as np
@@ -228,7 +229,7 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float=sigma, mu_sigma:floa
     """
     key, _z_key, sigma_key = jax.random.split(key, 3)
     _z = sigma*jax.random.normal(_z_key, shape=shape) # Is always centered at 0
-    sigma_beta_T = jax.lax.select(overwrite_sigma_val is not None, overwrite_sigma_val, sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma)
+    sigma_beta_T = overwrite_sigma_val if overwrite_sigma_val is not None else sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma
 
     prior = {'_z':_z,
             'sigma_beta_T':sigma_beta_T}
@@ -418,6 +419,7 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
     """
     # Define smc+bkst sampler
     overwrite_sigma = overwrite_sigma_val is not None
+
     # Define which paremeter sets are used for the prior/likelihood.
     # Other parameters are taken from global parameters
     if overwrite_sigma:
@@ -427,7 +429,7 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
         _bookstein_log_prior = lambda state: bookstein_log_prior(**state)
         _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs)
 
-    n_vars = (N - D) * D + 1 + 1 - (overwrite_sigma_val is not None)  # 1 for z_bx, 1 for sigma_beta_T (which we remove if we overwrite)
+    n_vars = (N - D) * D + 1 + 1 - overwrite_sigma  # 1 for z_bx, 1 for sigma_beta_T (which we remove if we overwrite)
     rmh_parameters = {'sigma': rmh_sigma * jnp.eye(n_vars)}
     smc = bjx.adaptive_tempered_smc(
         logprior_fn=_bookstein_log_prior,
@@ -442,6 +444,37 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
     # Initialize the particles
     key, init_position = initialize_bkst_particles(key, n_particles, (N, D), overwrite_sigma=overwrite_sigma)
     initial_smc_state = smc.init(init_position)
+
+    # bookstein_log_likelihood(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, obs:ArrayLike, bookstein_dist:float=bookstein_dist)
+    # print('Initial prior:',bookstein_log_prior(init_position['_z'][0], init_position['_zb_x'][0], init_position['sigma_beta_T'][0]))
+    # print('Initial logll:',bookstein_log_likelihood(init_position['_z'][0], init_position['_zb_x'][0], init_position['sigma_beta_T'][0], obs))
+    #
+    # print('> 0/< 1',np.all(obs > 0 ), np.all(obs < 1))
+    #
+    # init_withbkst = add_bkst_to_smc_trace(deepcopy(initial_smc_state), bookstein_dist, D=D)
+    #
+    # filename = 'TESTPLOT.png'
+    # plt.figure()
+    # plt.imshow(triu2mat(obs[0]), cmap='bwr')
+    # plt.colorbar()
+    #
+    # # _z_positions = init_withbkst.particles['_z']
+    # # z_positions = lorentz_to_poincare(get_attribute_from_trace(_z_positions, get_det_params, 'z', shape=(n_particles, N, D + 1)))
+    # # plt.figure()
+    # # ax = plt.gca()
+    # # plot_posterior(z_positions,
+    # #                edges=np.mean(obs, axis=0),  # Average over 2 observations -> (M,)
+    # #                pos_labels=plt_labels,
+    # #                ax=ax,
+    # #                title=f"Proposal S{n_sub} {task}",
+    # #                hyperbolic=True,
+    # #                continuous=True,
+    # #                bkst=True,
+    # #                threshold=plot_threshold)
+    # # poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
+    # # ax.add_patch(poincare_disk)
+    # plt.savefig(filename, bbox_inches='tight')
+    # plt.close()
 
     # Run SMC inference
     results = smc_bkst_inference_loop(key, smc.step, initial_smc_state)
@@ -497,7 +530,7 @@ if __name__ == "__main__":
 
             # Save sigma values
             if save_sigma_chain:
-                filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=f"{data_folder}/sbt_traces")
+                filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=get_safe_folder(f"{data_folder}/sbt_traces"))
                 with open(filename, 'wb') as f:
                     pickle.dump(sigma_trace[:n_iter], f)
 

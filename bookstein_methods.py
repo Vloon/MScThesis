@@ -126,7 +126,6 @@ def add_bkst_to_smc_trace(trace:TemperedSMCState, bkst_dist:float, latpos:str='_
         trace.particles[latpos] = new_particles
     return trace
 
-
 def smc_bkst_inference_loop(key: PRNGKeyArray, smc_kernel: Callable, initial_state: ArrayLike, max_iters: int=200) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]: ## <- klopt nie
     """
     Run the temepered SMC algorithm with Bookstein anchoring.

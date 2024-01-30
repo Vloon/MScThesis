@@ -26,6 +26,7 @@ arguments = [('-datfol', 'data_folder', str, 'Data'),  # folder where the data i
              ('-geo', 'geometry', str, 'hyp'),  # LS geometry ('hyp' or 'euc')
              ('--partial', 'partial', bool), # whether to use partial correlations
              ('--bpf', 'bpf', bool), # whether to use band-pass filtered rs-fMRI data
+             ('--onerest', 'one_rest', bool), # whether to give both REST tasks the same class label
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
@@ -46,6 +47,7 @@ subjectn = global_params['subjectn']
 
 partial = global_params['partial']
 bpf = global_params['bpf']
+one_rest = global_params['one_rest']
 
 det_params_dict = {'bin_euc':bin_euc_det_params,
                    'bin_hyp':bin_hyp_det_params,
@@ -72,12 +74,16 @@ for si, n_sub in enumerate(range(subject1, subjectn+1)):
             embedding = pickle.load(f) # -> n_particles x N x D
         idx = si*n_tasks + ti
         avg_distances[idx,:] = np.mean(get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd'), axis=0) # -> n_particles x M -> M
-        class_labels[idx] = ti
+        if one_rest and task == 'REST2': ### KEiiilelijk maar goed.
+            class_labels[idx] = ti-1
+        else:
+            class_labels[idx] = ti
 
-avg_distances_filename = get_filename_with_ext(f"{edge_type}_{geometry}_avg_distances", partial, bpf, folder=embedding_folder)
+one_rest_txt = '_one_rest' if one_rest else ''
+avg_distances_filename = get_filename_with_ext(f"{edge_type}_{geometry}_avg_distances{one_rest_txt}", partial, bpf, folder=embedding_folder)
 with open(avg_distances_filename, 'wb') as f:
     pickle.dump(avg_distances, f)
-class_label_filename = get_filename_with_ext(f"{edge_type}_{geometry}_class_labels", partial, bpf, folder=embedding_folder)
+class_label_filename = get_filename_with_ext(f"{edge_type}_{geometry}_class_labels{one_rest_txt}", partial, bpf, folder=embedding_folder)
 with open(class_label_filename, 'wb') as f:
     pickle.dump(class_labels, f)
 print(f"Saved distances to {avg_distances_filename}")

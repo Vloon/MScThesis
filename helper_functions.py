@@ -179,9 +179,6 @@ def load_observations(data_filename:str, task_filename:str, subject1:int, subjec
                 obs[si, ti, ei, :] = observed_values
     return obs, tasks, encs
 
-def obs_matrix_to_dict(): ### TODO: Implement?? maybe??
-    pass
-
 def node_pos_dict2array(pos_dict:dict) -> np.ndarray:
     """
     Puts the dictionary latent positions {node: position} into an (n,D) array
@@ -377,16 +374,16 @@ def parallel_transport(v:ArrayLike, nu:ArrayLike, mu:ArrayLike) -> ArrayLike:
     u = v + lorentzian(mu - alpha*nu, v, keepdims=True)/(alpha+1) * (nu + mu)
     return u
 
-def exponential_map(mu:ArrayLike, v:ArrayLike, eps:float=1e-6) -> ArrayLike:
+def exponential_map(mu:ArrayLike, u:ArrayLike, eps:float=1e-6) -> ArrayLike:
     """
     Maps the points v on the tangent space of mu onto the hyperolic plane
     PARAMS:
     mu (N,D) : Transported middle points
-    v (N,D) : Points to be mapped onto hyperbolic space
+    u (N,D) : Points to be mapped onto hyperbolic space (after parallel transport)
     eps : minimum value
     """
     # Euclidean norm from mu_0 to v is the same as from mu to u is the same as the Hyp-norm from mu to exp_mu(u), hence we can use the Euclidean norm of v.
-    lor = lorentzian(v,v,keepdims=True)
-    v_norm = jnp.sqrt(jnp.clip(lor, eps, lor))  ## If eps is too small, it gets rounded right back to zero and then we divide by zero
-    return jnp.cosh(v_norm) * mu + jnp.sinh(v_norm) * v / v_norm
+    lor = lorentzian(u,u,keepdims=True)
+    u_norm = jnp.sqrt(jnp.clip(lor, eps, lor))  ## If eps is too small, it gets rounded right back to zero and then we divide by zero
+    return jnp.cosh(u_norm) * mu + jnp.sinh(u_norm) * u / u_norm
 

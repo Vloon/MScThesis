@@ -9,13 +9,19 @@ from helper_functions import get_filename_with_ext, load_observations, get_cmd_p
 from bookstein_methods import add_bkst_to_smc_trace, get_bookstein_anchors
 from plotting_functions import plot_metric, plot_sigma_convergence
 
-from continuous_hyperbolic_LSM import get_det_params as con_hyp_det_params
 from binary_euclidean_LSM import get_det_params as bin_euc_det_params
+from binary_hyperbolic_LSM import get_det_params as bin_hyp_det_params
+from continuous_euclidean_LSM import get_det_params as con_euc_det_params
+from continuous_hyperbolic_LSM import get_det_params as con_hyp_det_params
 
 arguments = [('-eif', 'embedding_input_folder', str, 'Embeddings/prior_sim'), # base input folder of the embeddings
+             ('-ebn', 'embedding_basename', str, 'embedding'),
+             ('-pbn', 'prior_basename', str, 'gt_prior'),
              ('-dif', 'data_input_folder', str, 'Data/prior_sim'), # base input folder of the data
-             ('-np', 'n_particles', int, 1000), # number of particles used in the embedding
-             ('-nm', 'n_mcmc_steps', int, 100), # number of mcmc steps used in the embedding
+             ('-conbdf', 'con_base_data_filename', str, 'processed_data_downsampled_evenly_spaced'), # the most basic version of the filename of the continuous saved data
+             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_downsampled_evenly_spaced_max_0.05unconnected'), # the filename of the binary saved data
+             ('-np', 'n_particles', int, 2000), # number of particles used in the embedding
+             ('-nm', 'n_mcmc_steps', int, 500), # number of mcmc steps used in the embedding
              ('-tf', 'task_filename', str, 'task_list'), # filename of the list of task names
              ('-of', 'output_folder', str, 'Figures/prior_sim'), # folder where to dump figures
              ('-D', 'D', int, 2), # latent space dimensionality
@@ -23,31 +29,40 @@ arguments = [('-eif', 'embedding_input_folder', str, 'Embeddings/prior_sim'), # 
              ('-nt', 'n_tasks', int, 1), # number of tasks
              ('-Ns', 'N_vals', int, [10, 20, 50, 100, 164], '+'), # list of numbers of nodes
              ('-nobs', 'n_observations', int, [1, 2, 3, 5, 10], '+'), # list of numbers of observations
-             ('-sigs', 'sbt_vals', float, [-4.0, -2.0, 0.0, 1.0], '+'), # list of sigma_beta_T values (round off to 1 digit pls)
+             ('-sigs', 'sbt_vals', float, [-4.0, -2.0, -1.0, 0.0, 1.0], '+'), # list of sigma_beta_T values (round off to 1 digit pls)
              ('-et', 'edge_type', str, 'con'), # edge type ('con' or 'bin')
              ('-geo', 'geometry', str, 'hyp'), # LS geometry ('hyp' or 'euc')
-             ('--bkst', 'is_bookstein', bool), # whether the trace uses Bookstein anchors
-             ('-bkstdist', 'bkst_dist', float, 0.3), # distance between the bookstein anchors.
-             ('--log', 'do_log', bool), # whether to print correlations/R^2 value to a log file per subject/task/n_obs/N/sigma_beta_T
              ('--plotidv', 'plot_individual', bool), # whether to plot 1 random individual particle's gt_dist vs sample_dist scatterplot
              ('--plotsig', 'plot_sigma', bool), # whether to plot sigma convergence
              ('-nbins', 'n_bins', int, 100), # number of bins in the sigma/bound histogram
              ('-alpha', 'alpha', float, 0.05), # alpha for plotting the full distribution
+             ('-lfs', 'label_fontsize', float, 20),  # fontsize of labels (and legend)
+             ('-tfs', 'tick_fontsize', float, 16),  # fontsize of the tick labels
+             ('-wsz', 'wrapsize', float, 20),  # wrapped text width
              ('--usesave', 'use_save', bool), # whether to use a saved correlations pickle file
              ('-pklsf', 'pkl_savefile', str, 'prior_sim_corrs'), # pickle savefile name
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
 global_params = get_cmd_params(arguments)
+set_GPU(global_params['gpu'])
+
+label_fontsize = global_params['label_fontsize']
+tick_fontsize = global_params['tick_fontsize']
+wrapsize = global_params['wrapsize']
+
 edge_type = global_params['edge_type']
 geometry = global_params['geometry']
 assert edge_type in ['bin', 'con'], f"edge_type must be 'bin' or 'con' but is {edge_type}"
 assert geometry in ['euc', 'hyp'], f"geometry must be in 'euc' or 'hyp' but is {geometry}"
+base_data_filename = global_params['bin_base_data_filename'] if edge_type == 'bin' else global_params['con_base_data_filename']
 n_particles = global_params['n_particles']
 n_mcmc_steps = global_params['n_mcmc_steps']
 base_embedding_input_folder = f"{global_params['embedding_input_folder']}/{edge_type}_{geometry}"
+embedding_basename = global_params['embedding_basename']
 data_input_folder = f"{global_params['data_input_folder']}/{edge_type}_{geometry}"
 task_filename = global_params['task_filename']
+prior_basename = global_params['prior_basename']
 output_folder = f"{get_safe_folder(global_params['output_folder'])}/{edge_type}_{geometry}"
 D = global_params['D']
 n_subjects = global_params['n_subjects']
@@ -60,9 +75,6 @@ sbt_vals = global_params['sbt_vals']
 sbt_vals.sort()
 if edge_type == 'bin':
     sbt_vals = []
-is_bookstein = global_params['is_bookstein']
-bkst_dist = global_params['bkst_dist']
-do_log = global_params['do_log']
 plot_individual = global_params['plot_individual']
 plot_sigma = global_params['plot_sigma']
 if plot_sigma:
@@ -71,10 +83,13 @@ n_bins = global_params['n_bins']
 alpha = global_params['alpha']
 use_save = global_params['use_save']
 pkl_savefile = get_filename_with_ext(global_params['pkl_savefile'], folder=data_input_folder)
-set_GPU(global_params['gpu'])
 
-det_params_dict = {'con_hyp':con_hyp_det_params,
-                   'bin_euc':bin_euc_det_params}
+det_params_dict = {
+                   'bin_euc':bin_euc_det_params,
+                   'bin_hyp':bin_hyp_det_params,
+                   'con_euc':con_euc_det_params,
+                   'con_hyp':con_hyp_det_params,
+                   }
 det_params_func = det_params_dict[f"{edge_type}_{geometry}"]
 
 # n_subjects x n_tasks x n_Ns x n_obs x n_sigmas x n_particles
@@ -114,7 +129,7 @@ if not use_save or no_save:
                             print(f"Iter {i}/{total}\tS{n_sub} T{ti} N={N} n_obs={n_obs} sbt={sbt}")
 
                             ## Get ground truth. Y do i have this file structure?????
-                            gt_filename = get_filename_with_ext(f"gt_prior_S{n_sub}_T{ti}_N_{N}_n_obs_{n_obs}_sbt_{sbt}", folder=data_input_folder)
+                            gt_filename = get_filename_with_ext(f"{prior_basename}_{edge_type}_{geometry}_S{n_sub}_T{ti}_N_{N}_n_obs_{n_obs}_sbt_{sbt}", folder=data_input_folder)
                             with open(gt_filename, 'rb') as gt_f:
                                 gt_prior = pickle.load(gt_f)
                             ## Get latent positions and distances
@@ -122,13 +137,10 @@ if not use_save or no_save:
                             gt_distance = det_params_func(gt_latent_positions)['d']
 
                             ## Get embedding trace
-                            embedding_input_folder = f"{base_embedding_input_folder}/{edge_type}_{geometry}/N_{N}_n_obs_{n_obs}_sbt_{sbt}/{n_particles}p{n_mcmc_steps}s"
-                            embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_T{ti}_embedding", folder=embedding_input_folder)
+                            embedding_input_folder = f"{base_embedding_input_folder}/N_{N}_n_obs_{n_obs}_sbt_{sbt}/{n_particles}p{n_mcmc_steps}s"
+                            embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_T{ti}_{embedding_basename}", folder=embedding_input_folder)
                             with open(embedding_filename, 'rb') as e_f:
                                 embedding = pickle.load(e_f)
-                            ## Add bookstein ### HUUUH how is this correct, shouldn't this give an error since it should already have been bookstein'd?
-                            if is_bookstein:
-                                embedding = add_bkst_to_smc_trace(embedding, bkst_dist, latpos, D)
                             ## Get distance
                             distance_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd')  # n_particles x M
 
@@ -141,46 +153,31 @@ if not use_save or no_save:
                                 p_idx = np.random.randint(n_particles)
                                 plt.figure()
                                 plt.scatter(gt_distance, distance_trace[p_idx], c='k', s=0.5, alpha=0.8)
-                                plt.xlabel('Ground truth distance')
-                                plt.ylabel('Embedding distance')
-                                plt.title(f"Ground truth vs embedding distance\nS{n_sub} T{ti} particle {p_idx}\n{N} nodes, {n_obs} observations, sigma/bound {invlogit(sbt):.3f}")
-                                plt.tight_layout()
+                                plt.xlabel('Ground truth distance', fontsize=label_fontsize)
+                                plt.xticks(fontsize=tick_fontsize)
+                                plt.ylabel('Embedding distance', fontsize=label_fontsize)
+                                plt.yticks(fontsize=tick_fontsize)
+                                # plt.title(f"Ground truth vs embedding distance\nS{n_sub} T{ti} particle {p_idx}\n{N} nodes, {n_obs} observations, sigma/bound {invlogit(sbt):.3f}")
                                 savefile = get_filename_with_ext(f"gt_vs_emb_dist_S{n_sub}_T{ti}_N{N}_n_obs{n_obs}_sbt{sbt}_p{p_idx}", ext='png', folder=output_folder)
-                                plt.savefig(savefile)
+                                plt.savefig(savefile, bbox_inches='tight')
                                 plt.close()
-
-                            plt.figure()
-                            bound_hist, bound_bins = jnp.histogram(invlogit(embedding.particles['sigma_beta_T']), bins=n_bins, density=True)
-                            plt.stairs(bound_hist, bound_bins, fill=True, color='tab:gray')
-                            ymin, ymax = plt.ylim()
-                            plt.vlines(invlogit(sbt), ymin, ymax, 'red', 'dashed', label='True sigma/bound')
-                            plt.xlabel('Sigma/bound')
-                            plt.ylabel('Density')
-                            plt.title(f"Histogram of embedding sigma/bound\nS{n_sub} T{ti}\n{N} nodes, {n_obs} observations")
-                            plt.legend()
-                            plt.tight_layout()
-                            savefile = get_filename_with_ext(f"sbt_hist_S{n_sub}_T{ti}_N{N}_n_obs{n_obs}_sbt{sbt}", ext='png', folder=output_folder)
-                            plt.savefig(savefile)
-                            plt.close()
 
                             if plot_sigma:
                                 ## Load sigma data
-                                sigma_filename = get_filename_with_ext(f"sbt_prop_prior_sim_N_{N}_n_obs_{n_obs}_sbt_{sbt}_S{n_sub}_T{ti}", folder=data_input_folder)
+                                sigma_filename = get_filename_with_ext(f"{edge_type}_{geometry}_sbt_N_{N}_nobs_{n_obs}_sbt_{sbt:.1f}_S{n_sub}_T{ti}_{base_data_filename}", folder=f"{data_input_folder}/sbt_traces")
                                 with open(sigma_filename, 'rb') as sf:
                                     sigma_chain = pickle.load(sf)
 
                                 ## Plot sigma convergence, should be super dope if it works.
                                 plt.figure(figsize=(20, 10))
+                                xsize=2
                                 ax = plt.gca()
-
-                                ax = plot_sigma_convergence(sigma_chain, sbt, ax, n_bins)
-
-                                plt.xlabel('SMC iteration')
-                                plt.ylabel('Sigma/bound')
-                                plt.title(f"Convergence of sigma/bound over SMC iterations\nS{n_sub} T{ti}\n{N} nodes, {n_obs} observations, sigma/bound {invlogit(sbt):.3f}")
-                                plt.tight_layout()
+                                ax = plot_sigma_convergence(sigma_chain, sbt, ax, n_bins, label_fontsize=xsize*label_fontsize, tick_fontsize=xsize*tick_fontsize)
+                                plt.xlabel('SMC iteration', fontsize=xsize*label_fontsize)
+                                plt.ylabel(r'$\sigma$/bound', fontsize=xsize*label_fontsize)
+                                # plt.title(f"Convergence of sigma/bound over SMC iterations\nS{n_sub} T{ti}\n{N} nodes, {n_obs} observations, sigma/bound {invlogit(sbt):.3f}")
                                 savefile = get_filename_with_ext(f"sbt_convergence_S{n_sub}_T{ti}_N{N}_n_obs{n_obs}_sbt{sbt}", ext='png', folder=output_folder)
-                                plt.savefig(savefile)
+                                plt.savefig(savefile, bbox_inches='tight')
                                 plt.close()
                     #### --> edge_type == 'bin'
                     else:
@@ -188,7 +185,7 @@ if not use_save or no_save:
                         print(f"Iter {i}/{total}\tS{n_sub} T{ti} N={N} n_obs={n_obs}")
 
                         ## Get ground truth
-                        gt_filename = get_filename_with_ext(f"gt_prior_{edge_type}_{geometry}_S{n_sub}_T{ti}_N_{N}_n_obs_{n_obs}", folder=data_input_folder)
+                        gt_filename = get_filename_with_ext(f"{prior_basename}_{edge_type}_{geometry}_S{n_sub}_T{ti}_N_{N}_n_obs_{n_obs}", folder=data_input_folder)
                         with open(gt_filename, 'rb') as gt_f:
                             gt_prior = pickle.load(gt_f)
                         ## Get latent positions and distances
@@ -197,7 +194,7 @@ if not use_save or no_save:
 
                         ## Get embedding trace
                         embedding_input_folder = f"{base_embedding_input_folder}/N_{N}_n_obs_{n_obs}/{n_particles}p{n_mcmc_steps}s"
-                        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_T{ti}_embedding", folder=embedding_input_folder)
+                        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_T{ti}_{embedding_basename}", folder=embedding_input_folder)
                         with open(embedding_filename, 'rb') as e_f:
                             embedding = pickle.load(e_f)
 
@@ -213,12 +210,11 @@ if not use_save or no_save:
                             p_idx = np.random.randint(n_particles)
                             plt.figure()
                             plt.scatter(gt_distance, distance_trace[p_idx], c='k', s=0.5, alpha=0.8)
-                            plt.xlabel('Ground truth distance')
-                            plt.ylabel('Embedding distance')
-                            plt.title(f"Ground truth vs embedding distance\nS{n_sub} T{ti} particle {p_idx}\n{N} nodes, {n_obs} observations")
-                            plt.tight_layout()
+                            plt.xlabel('Ground truth distance', fontsize=label_fontsize)
+                            plt.ylabel('Embedding distance', fontsize=label_fontsize)
+                            # plt.title(f"Ground truth vs embedding distance\nS{n_sub} T{ti} particle {p_idx}\n{N} nodes, {n_obs} observations")
                             savefile = get_filename_with_ext(f"gt_vs_emb_dist_S{n_sub}_T{ti}_N{N}_n_obs{n_obs}_p{p_idx}", ext='png', folder=output_folder)
-                            plt.savefig(savefile)
+                            plt.savefig(savefile, bbox_inches='tight')
                             plt.close()
 
 
@@ -243,8 +239,10 @@ N_dists = [N_vals[i+1] - N_vals[i] for i in range(len(N_vals) - 1)]
 min_N_dist, max_N_dist = np.min(N_dists), N_vals[-1] - N_vals[0]
 x_margin = max_N_dist * boxplot_margin
 plot_N_vals = [N+i*x_margin for i, N in enumerate(N_vals)]
-loc_increment, o_loc_increment, midpoint = min_N_dist/len(sbt_vals), min_N_dist/len(n_observations), min_N_dist/2
-location_offset = [loc_increment*i-midpoint for i in range(len(sbt_vals))]
+loc_increment = min_N_dist/len(sbt_vals) if edge_type == 'con' else np.nan
+o_loc_increment, midpoint = min_N_dist/len(n_observations), min_N_dist/2
+if edge_type == 'con':
+    location_offset = [loc_increment*i-midpoint for i in range(len(sbt_vals))]
 o_location_offset = [o_loc_increment*i-midpoint for i in range(len(n_observations))]
 box_width = min_N_dist/(len(sbt_vals)+1) # Add one to leave space between boxes
 o_box_width = min_N_dist/(len(n_observations)+1) # Add one to leave space between boxes
@@ -262,12 +260,13 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
     for ni, N in enumerate(N_vals):
         full_dist_N = np.ravel(sub_correlations[ni])
         plt.scatter(np.repeat(N, len(full_dist_N)), full_dist_N, **dist_params)
-    plt.xlabel('Number of nodes')
-    plt.ylabel('Ground truth vs embedding distance correlation')
-    plt.title(f"Distance correlation by number of nodes\nS{n_sub}")
-    plt.tight_layout()
+    plt.xlabel('Number of nodes', fontsize=label_fontsize)
+    plt.xticks(fontsize=tick_fontsize)
+    plt.ylabel('Correlation', fontsize=label_fontsize)
+    plt.yticks(fontsize=tick_fontsize)
+    # plt.title(f"Distance correlation by number of nodes\nS{n_sub}")
     savefile = get_filename_with_ext(f"dist_corr_N_S{n_sub}",ext='png', folder=output_folder)
-    plt.savefig(savefile)
+    plt.savefig(savefile, bbox_inches='tight')
     plt.close()
 
     ## Full distribution observations
@@ -275,12 +274,13 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
     for oi, n_obs in enumerate(n_observations):
         full_dist_obs = np.ravel(sub_correlations[:, oi])
         plt.scatter(np.repeat(n_obs, len(full_dist_obs)), full_dist_obs, **dist_params)
-    plt.xlabel('Number of observations')
-    plt.ylabel('Ground truth vs embedding distance correlation')
-    plt.title(f"Distance correlation by number of observations\nS{n_sub}")
-    plt.tight_layout()
+    plt.xlabel('Number of observations', fontsize=label_fontsize)
+    plt.xticks(fontsize=tick_fontsize)
+    plt.ylabel('Ground truth vs embedding distance correlation', fontsize=label_fontsize)
+    plt.yticks(fontsize=tick_fontsize)
+    # plt.title(f"Distance correlation by number of observations\nS{n_sub}")
     savefile = get_filename_with_ext(f"dist_corr_n_obs_S{n_sub}", ext='png', folder=output_folder)
-    plt.savefig(savefile)
+    plt.savefig(savefile, bbox_inches='tight')
     plt.close()
 
     if edge_type == 'con':
@@ -289,12 +289,13 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
         for sbt_i, sbt in enumerate(sbt_vals):
             full_dist_sbt = np.ravel(sub_correlations[:, :, sbt_i])
             plt.scatter(np.repeat(invlogit(sbt), len(full_dist_sbt)), full_dist_sbt, **dist_params)
-        plt.xlabel('sigma/bound')
-        plt.ylabel('Ground truth vs embedding distance correlation')
-        plt.title(f"Distance correlation by sigma/bound\nS{n_sub}")
-        plt.tight_layout()
+        plt.xlabel(r'$\sigma$/bound', fontsize=label_fontsize)
+        plt.xticks(fontsize=tick_fontsize)
+        plt.ylabel('Correlation', fontsize=label_fontsize)
+        plt.yticks(fontsize=tick_fontsize)
+        # plt.title(f"Distance correlation by sigma/bound\nS{n_sub}")
         savefile = get_filename_with_ext(f"dist_corr_sbt_S{n_sub}", ext='png', folder=output_folder)
-        plt.savefig(savefile)
+        plt.savefig(savefile, bbox_inches='tight')
         plt.close()
 
     ## Plot average over not N
@@ -303,12 +304,13 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
     std_N_corr = np.std(sub_correlations, axis=ax)
     plt.figure()
     plt.errorbar(N_vals, avg_N_corr, yerr=std_N_corr, **avg_params)
-    plt.xlabel('Number of nodes')
-    plt.ylabel('Ground truth vs embedding distance correlation')
-    plt.title(f"Distance correlation by number of nodes\nS{n_sub}")
-    plt.tight_layout()
+    plt.xlabel('Number of nodes', fontsize=label_fontsize)
+    plt.xticks(fontsize=tick_fontsize)
+    plt.ylabel('Correlation', fontsize=label_fontsize)
+    plt.yticks(fontsize=tick_fontsize)
+    # plt.title(f"Distance correlation by number of nodes\nS{n_sub}")
     savefile = get_filename_with_ext(f"avg_dist_corr_N_S{n_sub}",ext='png', folder=output_folder)
-    plt.savefig(savefile)
+    plt.savefig(savefile, bbox_inches='tight')
     plt.close()
 
     # Plot average over not obs
@@ -317,12 +319,13 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
     std_obs_corr = np.std(sub_correlations, axis=ax)
     plt.figure()
     plt.errorbar(n_observations, avg_obs_corr, yerr=std_obs_corr, **avg_params)
-    plt.xlabel('Number of observations')
-    plt.ylabel('Ground truth vs embedding distance correlation')
-    plt.title(f"Distance correlation by number of observations\nS{n_sub}")
-    plt.tight_layout()
+    plt.xlabel('Number of observations', fontsize=label_fontsize)
+    plt.xticks(fontsize=tick_fontsize)
+    plt.ylabel('Correlation', fontsize=label_fontsize)
+    plt.yticks(fontsize=tick_fontsize)
+    # plt.title(f"Distance correlation by number of observations\nS{n_sub}")
     savefile = get_filename_with_ext(f"avg_dist_corr_n_obs_S{n_sub}", ext='png', folder=output_folder)
-    plt.savefig(savefile)
+    plt.savefig(savefile, bbox_inches='tight')
     plt.close()
 
     if edge_type == 'con':
@@ -331,12 +334,13 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
         std_sbt_corr = np.std(sub_correlations, axis=(N_ax, obs_ax, p_ax))
         plt.figure()
         plt.errorbar([invlogit(sbt) for sbt in sbt_vals], avg_sbt_corr, yerr=std_sbt_corr, **avg_params)
-        plt.xlabel('sigma/bound')
-        plt.ylabel('Ground truth vs embedding distance correlation')
-        plt.title(f"Distance correlation by sigma/bound\nS{n_sub}")
-        plt.tight_layout()
+        plt.xlabel(r'$\sigma$/bound', fontsize=label_fontsize)
+        plt.xticks(fontsize=tick_fontsize)
+        plt.ylabel('Correlation', fontsize=label_fontsize)
+        plt.yticks(fontsize=tick_fontsize)
+        # plt.title(f"Distance correlation by sigma/bound\nS{n_sub}")
         savefile = get_filename_with_ext(f"avg_dist_corr_sbt_S{n_sub}", ext='png', folder=output_folder)
-        plt.savefig(savefile)
+        plt.savefig(savefile, bbox_inches='tight')
         plt.close()
 
         ## Plot average over only particles, a seperate line for each n_obs, x=N, new plot per sigma/bound
@@ -346,13 +350,16 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
                 avg_corr = np.mean(sub_correlations[:, oi, sbt_i, :], axis=-1)
                 std_corr = np.std(sub_correlations[:, oi, sbt_i, :], axis=-1)
                 plt.errorbar(N_vals, avg_corr, yerr=std_corr, capsize=avg_params['capsize'], c=obs_colors[oi], label=f"n_obs={n_obs}")
-            plt.title(f"Average embedding distance vs ground truth distance correlations \nwith standard deviation\n Sigma/bound={invlogit(sbt):.2f}, S{n_sub}")
-            plt.legend()
-            plt.xlabel('Number of nodes')
-            plt.ylabel('Ground truth vs embedding distance correlation')
-            plt.tight_layout()
+            # plt.title(f"Average embedding distance vs ground truth distance correlations \nwith standard deviation\n Sigma/bound={invlogit(sbt):.2f}, S{n_sub}")
+            if geometry == 'hyp':
+                plt.legend(fontsize=label_fontsize) #, bbox_to_anchor=(1.0,1.0))
+            plt.xlabel('Number of nodes', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            if geometry == 'euc':
+                plt.ylabel('Correlation', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             savefile = get_filename_with_ext(f"avg_dist_corr_N_by_n_obs_S{n_sub}_sbt{sbt}", ext='png', folder=output_folder)
-            plt.savefig(savefile)
+            plt.savefig(savefile, bbox_inches='tight')
             plt.close()
 
         ## Plot average over only particles, a seperate line for each N, x=n_obs, new plot per sigma/bound
@@ -364,14 +371,17 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
                 # std_corr = np.std(full_correlations[si, ti, ni, :, sbt_i, :], axis=-1)
                 std_corr = np.std(sub_correlations[ni, :, sbt_i, :], axis=-1)
                 plt.errorbar(n_observations, avg_corr, yerr=std_corr, capsize=avg_params['capsize'], c=N_colors[ni], label=f"N={N}")
-            plt.title(f"Average embedding distance vs ground truth distance correlations \nwith standard deviation\nSigma/bound={invlogit(sbt):.2f}, S{n_sub}")
-            plt.legend()
-            plt.xlabel('Number of observations')
-            plt.ylabel('Ground truth vs embedding distance correlation')
-            plt.tight_layout()
+            # plt.title(f"Average embedding distance vs ground truth distance correlations \nwith standard deviation\nSigma/bound={invlogit(sbt):.2f}, S{n_sub}")
+            if geometry == 'hyp':
+                plt.legend(fontsize=label_fontsize) #, bbox_to_anchor=(1.0,1.0))
+            plt.xlabel('Number of observations', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            if geometry == 'euc':
+                plt.ylabel('Correlation', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             # savefile = get_filename_with_ext(f"avg_dist_corr_n_obs_by_N_S{n_sub}_T{ti}_sbt{sbt}", ext='png', folder=output_folder)
             savefile = get_filename_with_ext(f"avg_dist_corr_n_obs_by_N_S{n_sub}_sbt{sbt}", ext='png', folder=output_folder)
-            plt.savefig(savefile)
+            plt.savefig(savefile, bbox_inches='tight')
             plt.close()
 
         ## Plot average over only particles, a seperate line for each sigma/bound, x=N, new plot per n_obs
@@ -382,15 +392,18 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
                 avg_corr = np.mean(sub_correlations[:, oi, sbt_i, :], axis=-1)
                 # std_corr = np.std(full_correlations[si, ti, :, oi, sbt_i, :], axis=-1)
                 std_corr = np.std(sub_correlations[:, oi, sbt_i, :], axis=-1)
-                plt.errorbar(N_vals, avg_corr, yerr=std_corr, capsize=avg_params['capsize'], c=sbt_colors[sbt_i], label=f"Sigma/bound={invlogit(sbt):.2f}")
-            plt.title(f"Average embedding distance vs ground truth distance correlations \nwith standard deviation\nn_obs={n_obs}")
-            plt.legend()
-            plt.xlabel('Number of nodes')
-            plt.ylabel('Ground truth vs embedding distance correlation')
-            plt.tight_layout()
+                plt.errorbar(N_vals, avg_corr, yerr=std_corr, capsize=avg_params['capsize'], c=sbt_colors[sbt_i], label=r"$\sigma$/bound={:.2f}".format(invlogit(sbt)))
+            # plt.title(f"Average embedding distance vs ground truth distance correlations \nwith standard deviation\nn_obs={n_obs}")
+            if geometry == 'hyp':
+                plt.legend(fontsize=label_fontsize, bbox_to_anchor=(1.0,1.0))
+            plt.xlabel('Number of nodes', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            if geometry == 'euc':
+                plt.ylabel('Correlation', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             # savefile = get_filename_with_ext(f"avg_dist_corr_N_by_sbt_S{n_sub}_T{ti}_n_obs{n_obs}", ext='png', folder=output_folder)
             savefile = get_filename_with_ext(f"avg_dist_corr_N_by_sbt_S{n_sub}_n_obs{n_obs}", ext='png', folder=output_folder)
-            plt.savefig(savefile)
+            plt.savefig(savefile, bbox_inches='tight')
             plt.close()
 
         ## N_obs has clear effect: for each n_obs, we plot per N all boxplots for each sigma/bound
@@ -411,17 +424,17 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
                                      flierprops=dict(color='white', markeredgecolor='grey'))
                     if ni == 0:
                         bp['boxes'][0].set_label(f"Sigma/bound={invlogit(sbt):.2f}")
-            plt.xticks(ticks=plot_N_vals, labels=N_vals) ## TODO: Only ever nth number!
+            plt.xticks(ticks=plot_N_vals, labels=N_vals, fontsize=tick_fontsize) ## TODO: Only ever nth number!
             plt.xlim(plot_N_vals[0]-min_N_dist, plot_N_vals[-1]+min_N_dist)
             # plt.ylim(0, 1)
-            plt.xlabel('Number of nodes')
-            plt.ylabel('Ground truth vs embedding distance correlation')
-            plt.legend()
-            plt.title(f"Embedding distance vs ground truth distance correlations\nNumber of observations={n_obs}")
-            plt.tight_layout()
+            plt.xlabel('Number of nodes', fontsize=label_fontsize)
+            plt.ylabel('Correlation', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
+            plt.legend(fontsize=label_fontsize)
+            # plt.title(f"Embedding distance vs ground truth distance correlations\nNumber of observations={n_obs}")
             # savefile = get_filename_with_ext(f"box_dist_corr_S{n_sub}_T{ti}_n_obs{n_obs}", ext='png', folder=output_folder)
             savefile = get_filename_with_ext(f"box_dist_corr_S{n_sub}_n_obs{n_obs}", ext='png', folder=output_folder)
-            plt.savefig(savefile)
+            plt.savefig(savefile, bbox_inches='tight')
             plt.close()
 
     else: ### Bin edges
@@ -431,13 +444,16 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
             avg_corr = np.mean(sub_correlations[:, oi, :], axis=-1)
             std_corr = np.std(sub_correlations[:, oi, :], axis=-1)
             plt.errorbar(N_vals, avg_corr, yerr=std_corr, capsize=avg_params['capsize'], c=obs_colors[oi], label=f"n_obs={n_obs}")
-        plt.title(f"Average embedding distance vs ground truth distance correlations \n S{n_sub}")
-        plt.legend()
-        plt.xlabel('Number of nodes')
-        plt.ylabel('Ground truth vs embedding distance correlation')
-        plt.tight_layout()
+        # plt.title(f"Average embedding distance vs ground truth distance correlations \n S{n_sub}")
+        if geometry == 'hyp':
+            plt.legend(fontsize=label_fontsize) #, bbox_to_anchor=(1.0,1.0))
+        plt.xlabel('Number of nodes', fontsize=label_fontsize)
+        plt.xticks(fontsize=tick_fontsize)
+        if geometry == 'euc':
+           plt.ylabel('Correlation', fontsize=label_fontsize)
+        plt.yticks(fontsize=tick_fontsize)
         savefile = get_filename_with_ext(f"avg_dist_corr_N_by_n_obs_S{n_sub}", ext='png', folder=output_folder)
-        plt.savefig(savefile)
+        plt.savefig(savefile, bbox_inches='tight')
         plt.close()
 
         ## Plot average over only particles, a seperate line for each N, x=n_obs, new plot per sigma/bound
@@ -446,13 +462,16 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
             avg_corr = np.mean(sub_correlations[ni, :, :], axis=-1)
             std_corr = np.std(sub_correlations[ni, :, :], axis=-1)
             plt.errorbar(n_observations, avg_corr, yerr=std_corr, capsize=avg_params['capsize'], c=N_colors[ni], label=f"N={N}")
-        plt.title(f"Average embedding distance vs ground truth distance correlations \nS{n_sub}")
-        plt.legend()
-        plt.xlabel('Number of observations')
-        plt.ylabel('Ground truth vs embedding distance correlation')
-        plt.tight_layout()
+        # plt.title(f"Average embedding distance vs ground truth distance correlations \nS{n_sub}")
+        if geometry == 'hyp':
+            plt.legend(fontsize=label_fontsize) #, bbox_to_anchor=(1.0,1.0))
+        plt.xlabel('Number of observations', fontsize=label_fontsize)
+        plt.xticks(fontsize=tick_fontsize)
+        if geometry == 'euc':
+            plt.ylabel('Correlation', fontsize=label_fontsize)
+        plt.yticks(fontsize=tick_fontsize)
         savefile = get_filename_with_ext(f"avg_dist_corr_n_obs_by_N_S{n_sub}", ext='png', folder=output_folder)
-        plt.savefig(savefile)
+        plt.savefig(savefile, bbox_inches='tight')
         plt.close()
 
         plt.figure(figsize=(20, 10))
@@ -470,14 +489,14 @@ for si, n_sub in enumerate(range(1,n_subjects+1)):
                                  flierprops=dict(color='white', markeredgecolor='grey'))
                 if ni == 0:
                     bp['boxes'][0].set_label(f"n_obs={n_obs}")
-            plt.xticks(ticks=plot_N_vals, labels=N_vals)
+            plt.xticks(ticks=plot_N_vals, labels=N_vals, fontsize=tick_fontsize)
             plt.xlim(plot_N_vals[0] - min_N_dist, plot_N_vals[-1] + min_N_dist)
             # plt.ylim(0, 1)
-            plt.xlabel('Number of nodes')
-            plt.ylabel('Ground truth vs embedding distance correlation')
+            plt.xlabel('Number of nodes', fontsize=label_fontsize)
+            plt.ylabel('Correlation', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             plt.legend()
-            plt.title(f"Embedding distance vs ground truth distance correlations")
-            plt.tight_layout()
+            # plt.title(f"Embedding distance vs ground truth distance correlations")
             savefile = get_filename_with_ext(f"box_dist_corr_S{n_sub}", ext='png', folder=output_folder)
-            plt.savefig(savefile)
+            plt.savefig(savefile, bbox_inches='tight')
             plt.close()

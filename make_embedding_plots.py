@@ -14,8 +14,8 @@ from continuous_hyperbolic_LSM import get_det_params as con_hyp_det_params
 
 arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used, it overwrites the default filename
              ('-datfol', 'data_folder', str, 'Data'),  # folder where the data is stored
-             ('-conbdf', 'con_base_data_filename', str, 'processed_data'), # the most basic version of the filename of the continuous saved data
-             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_max_0.05unconnected'), # the filename of the binary saved data
+             ('-conbdf', 'con_base_data_filename', str, 'processed_data_downsampled_evenly_spaced'), # the most basic version of the filename of the continuous saved data
+             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_downsampled_evenly_spaced_max_0.05unconnected'), # the filename of the binary saved data
              ('-datath', 'data_threshold', float, 0.5),  # threshold for the binary data
              ('-if', 'base_input_folder', str, 'Embeddings'), # base input folder of the embeddings
              ('-np', 'n_particles', int, 1000), # number of particles used in the embedding
@@ -32,8 +32,10 @@ arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used,
              ('--partial', 'partial', bool), # whether to use partial correlations
              ('--bpf', 'bpf', bool), # whether to use band-pass filtered correlations
              ('--print', 'do_print', bool), # whether to print
+             ('--zoom', 'zoom', bool), # whether to zoom in on the hyperbolic nodes (and maybe cut off the disk)  
              ('-lab', 'label_location', str, 'Figures/lobelabels.npz'),  # file location of the labels
              ('--nolabels', 'no_labels', bool), # whether to not use labels
+             ('--language', 'language_only', bool), # whether to plot the auditory task only
              ('-plotth', 'plot_threshold', float, 0.4), # threshold for plotting edges
              ('-figsz', 'figsz', float, 10), # figure size in both x and y direction
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (as str). If no GPU is specified, CPU is used.
@@ -53,15 +55,18 @@ n_particles = global_params['n_particles']
 N = global_params['N']
 M = N*(N-1)//2
 D = global_params['D']
+language_only = global_params['language_only']
+language_folder = '/language' if language_only else ''
 input_folder = f"{global_params['base_input_folder']}/{n_particles}p{global_params['n_mcmc_steps']}s"
 task_filename = get_filename_with_ext(global_params['task_filename'], ext='txt', folder=data_folder)
-output_folder = get_safe_folder(f"{global_params['output_folder']}/{n_particles}p{global_params['n_mcmc_steps']}s")
+output_folder = get_safe_folder(f"{global_params['output_folder']}/{n_particles}p{global_params['n_mcmc_steps']}s{language_folder}")
 subject1 = global_params['subject1']
 subjectn = global_params['subjectn']
 is_bookstein = global_params['is_bookstein']
 partial = global_params['partial']
 bpf = global_params['bpf']
 do_print = global_params['do_print']
+zoom = global_params['zoom']
 label_location = global_params['label_location']
 no_labels = global_params['no_labels']
 plot_threshold = global_params['plot_threshold']
@@ -73,11 +78,26 @@ det_params_dict = {'bin_euc':bin_euc_det_params,
                    'con_hyp':con_hyp_det_params}
 det_params_func = det_params_dict[f"{edge_type}_{geometry}"]
 
+task_names = {
+    'REST1' : 'Rest 1',
+    'REST2' : 'Rest 2',
+    'EMOTION' : 'Emotional processing',
+    'GAMBLING' : 'Gambling',
+    'LANGUAGE' : 'Language',
+    'MOTOR' : 'Motor',
+    'RELATIONAL' : 'Relational processing',
+    'SOCIAL' : 'Social cognition',
+    'WM' : 'Working memory'
+}
+
 if not overwrite_data_filename:
     data_filename = get_filename_with_ext(base_data_filename, partial, bpf, folder=data_folder)
 else:
     data_filename = overwrite_data_filename
 obs, tasks, encs = load_observations(data_filename, task_filename, subject1, subjectn, M)
+
+if language_only:
+    tasks = ['LANGUAGE']
 
 # Load labels
 if not no_labels:
@@ -93,8 +113,7 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
         if do_print:
             print(f"Making plot for S{n_sub} {task}")
         # Load embedding
-        bin_txt = f"_{base_data_filename}" if edge_type == 'bin' else ''
-        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding{bin_txt}", partial=partial, bpf=bpf, folder=input_folder)
+        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{base_data_filename}", partial=partial, bpf=bpf, folder=input_folder)
         with open(embedding_filename, 'rb') as f:
             embedding = pickle.load(f)
 
@@ -104,32 +123,38 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
         elif geometry == 'euc':
             z_positions= embedding.particles['z']
 
-        ## TODO: ADD LABELS!
         # Plot posterior
         plt.figure(figsize=(figsz, figsz*.75))
         ax = plt.gca()
-        if geometry == 'hyp':
-            max_r = 1
-            r_margin = 0
-        else:
-            radii = jnp.sqrt(jnp.sum(z_positions ** 2, axis=2))
-            max_r = jnp.max(radii)
-            r_margin = 0.1
+
+        radii = jnp.sqrt(jnp.sum(z_positions ** 2, axis=2))
+        max_r = jnp.max(radii)
+        r_margin = 0.05
+
+        margin = r_margin if geometry == 'euc' else 0
+        disk_radius = max_r if geometry == 'euc' else 1
+
         plot_posterior(z_positions,
-                       edges=obs[si, ti, 0],
+                       edges=np.mean(obs[si, ti], axis=0),
                        pos_labels=plt_labels,
                        ax=ax,
-                       title=f"Proposal S{n_sub} {task}",
+                       title=f"Posterior S{n_sub} {task_names[task]}",
                        hyperbolic=geometry=='hyp',
                        bkst=is_bookstein,
-                       disk_radius=max_r,
-                       margin=r_margin,
+                       disk_radius=disk_radius,
+                       margin=margin,
                        threshold=plot_threshold)
-        poincare_disk = plt.Circle((0, 0), max_r*(1+r_margin), color='k', fill=False, clip_on=False)
+        poincare_disk = plt.Circle((0, 0), disk_radius*(1+margin), color='k', fill=False, clip_on=False)
         ax.add_patch(poincare_disk)
+        if zoom and geometry == 'hyp':
+            r_margin = 1+r_margin
+            ax.set(xlim=(-r_margin*max_r, r_margin*max_r), ylim=(-r_margin*max_r, r_margin*max_r))
+
         # Save figure
+        language_txt = 'language_labelled_' if language_only else ''
         partial_txt = '_partial' if partial else ''
-        base_save_filename = f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{base_data_filename}{partial_txt}"
+        base_save_filename = f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{language_txt}{base_data_filename}{partial_txt}"
         savefile = get_filename_with_ext(base_save_filename, ext='png', folder=output_folder)
-        plt.savefig(savefile, bbox_inches='tight')
+        bbox = None if edge_type == 'con' and geometry == 'hyp' else 'tight'
+        plt.savefig(savefile, bbox_inches=bbox, pad_inches=0)
         plt.close()

@@ -85,9 +85,11 @@ def partial_correlation(x:ArrayLike) -> ArrayLike:
     PARAMS:
     x : (N, T) matrix containing timeseries.
     """
-    print(f'\tCalculating partial correlation on {x.shape} matrix')
+    if do_print:
+        print(f'\tCalculating partial correlation on {x.shape} matrix')
     cov_obj = GraphicalLassoCV(verbose=do_print).fit(x)
-    print('\tDone with Graphical Lassoing')
+    if do_print:
+        print('\tDone with Graphical Lassoing')
     precision = cov_obj.precision_ # Get sparse precision matrix
     diag = jnp.diagonal(precision)
     div = jnp.sqrt(jnp.outer(diag, diag))
@@ -227,7 +229,7 @@ if downsample:
         print(f"All lengths are {_ts_lengths}")
     for key, timeseries in ts_data.items():
         if downsample_method == 'evenly_spaced':
-            ts_data[key] = timeseries[:, np.linspace(0, len(timeseries)-1, min_length, dtype=int)]
+            ts_data[key] = timeseries[:, np.linspace(0, timeseries.shape[1]-1, min_length, dtype=int)]
         elif downsample_method == 'cut_off':
             ts_data[key] = timeseries[:, :min_length]
     if make_plot:

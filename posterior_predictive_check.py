@@ -18,17 +18,16 @@ from binary_hyperbolic_LSM import get_det_params as bin_hyp_det_params, sample_o
 from continuous_euclidean_LSM import get_det_params as con_euc_det_params, sample_observation as con_euc_sample_observation, log_likelihood_from_dist as con_loglikelihood
 from continuous_hyperbolic_LSM import get_det_params as con_hyp_det_params, sample_observation as con_hyp_sample_observation
 
-
 arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used, it overwrites the default filename
              ('-datfol', 'data_folder', str, 'Data'),  # folder where the data is stored
-             ('-conbdf', 'con_base_data_filename', str, 'processed_data'), # the most basic version of the filename of the continuous saved data
-             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_max_0.05unconnected'), # the most basic version of the filename of the binary saved data
+             ('-conbdf', 'con_base_data_filename', str, 'processed_data_downsampled_evenly_spaced'), # the most basic version of the filename of the continuous saved data
+             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_downsampled_evenly_spaced_max_0.05unconnected'), # the most basic version of the filename of the binary saved data
              ('-ef', 'embedding_folder', str, 'Embeddings'), # base input folder of the embeddings
              ('-ff', 'figure_folder', str, 'Figures/sanity_checks/posterior_predictive_checks'), # figure output folder
              ('-tf', 'task_filename', str, 'task_list'), # filename of the list of task names
              ('-lab', 'label_location', str, 'Figures/lobelabels.npz'),  # file location of the labels
-             ('-np', 'n_particles', int, 1000), # number of particles used in the embedding
-             ('-nm', 'n_mcmc_steps', int, 100), # number of mcmc steps used in the embedding
+             ('-np', 'n_particles', int, 2000), # number of particles used in the embedding
+             ('-nm', 'n_mcmc_steps', int, 500), # number of mcmc steps used in the embedding
              ('-N', 'N', int, 164), # number of nodes
              ('-s1', 'subject1', int, 1), # first subject to plot
              ('-sn', 'subjectn', int, 25), # last subject to plot
@@ -40,15 +39,26 @@ arguments = [('-overwritedf', 'overwrite_data_filename', str, None),  # if used,
              ('-sbins', 'n_shuffle_bins', int, 1000), # number of bins in the shuddled histogram
              ('-palpha', 'plot_alpha', float, 0.7), # alpha for the histograms
              ('-cmap', 'cmap', str, 'bwr'), # colormap for the imshows of the real vs predicted observations
+             ('-lfs', 'label_fontsize', float, 20), # fontsize of labels (and legend)
+             ('-tfs', 'tick_fontsize', float, 16), # fontsize of the tick labels
+             ('-wsz', 'wrapsize', float, 20), # wrapped text width
              ('--partial', 'partial', bool), # whether to use partial correlations
              ('--bpf', 'bpf', bool), # whether to use band-pass filtered rs-fMRI data
-             ('--shuf', 'do_shuffle', bool), # whether to do the whole shuffling thang
+             ('--shuf', 'do_shuffle', bool), # whether to perform a permutation test
+             ('--saveerrs', 'save_errors', bool), # whether to save the predictions
+             ('--onlypred', 'only_predict', bool), # whether to only create the prediction error file without doing any plotting
+             ('-errname', 'error_savename', str, 'prediction_errors'), # name with which to save the prediction error file
+             ('-errfld', 'error_folder', str, 'Statistics'), # folder where to save the prediction error file
              ('-seed', 'seed', int, 1234), # starting random key
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
 global_params = get_cmd_params(arguments)
 set_GPU(global_params['gpu'])
+label_fontsize = global_params['label_fontsize']
+tick_fontsize = global_params['tick_fontsize']
+wrapsize = global_params['wrapsize']
+
 overwrite_data_filename = global_params['overwrite_data_filename']
 n_particles = global_params['n_particles']
 embedding_folder = f"{global_params['embedding_folder']}/{n_particles}p{global_params['n_mcmc_steps']}s"
@@ -74,6 +84,12 @@ cmap = global_params['cmap']
 partial = global_params['partial']
 bpf = global_params['bpf']
 do_shuffle = global_params['do_shuffle']
+save_errors = global_params['save_errors']
+error_folder = get_safe_folder(global_params['error_folder'])
+error_savename = get_filename_with_ext(f"{edge_type}_{geometry}_{global_params['error_savename']}", partial, bpf, folder=error_folder)
+avg_error_savename = get_filename_with_ext(f"{edge_type}_{geometry}_avg_{global_params['error_savename']}", partial, bpf, folder=error_folder)
+
+only_predict = global_params['only_predict']
 
 ### JAX stuff
 key = jax.random.PRNGKey(global_params['seed'])    
@@ -128,7 +144,7 @@ def get_bin_log_likelihood(i:int, log_likelihoods:ArrayLike, distances:ArrayLike
 
 def get_obs_samples(i:int, state:Tuple[PRNGKeyArray,ArrayLike], parameters:list, embedding:TemperedSMCState, set_sigma:float=set_sigma, sample_obs_func:Callable=sample_obs_func):
     """
-    Returns a sampled observation, based on the given posterior (posterior predictive check). 
+    Returns a sampled observation, based on the given posterior (posterior predictive check)
     PARAMS:
     i : particle index
     state: tuple containing key, predictions
@@ -147,6 +163,25 @@ def get_obs_samples(i:int, state:Tuple[PRNGKeyArray,ArrayLike], parameters:list,
     predictions = predictions.at[i].set(pred[0]) # Take first element because it's technically a 1,M array which doesn't fit in a M sized space
     return key, predictions
 
+def get_predictions(key:PRNGKeyArray, n_sub, task, edge_type:str=edge_type, geometry:str=geometry, base_data_filename:str=base_data_filename,
+                    sigma_txt:str=sigma_txt, partial:bool=partial, bpf:bool=bpf, embedding_folder:str=embedding_folder,
+                    set_sigma:bool=set_sigma, n_particles:int=n_particles, M:int=M):
+    """
+    Loads the embedding and makes the predictions for the given subject, taks
+    PARAMS:
+    key : jax random key
+    n_sub : subject number
+    task : task name
+    ... Rest taken from globals don't wanna write it out.
+    """
+    embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{base_data_filename}{sigma_txt}", partial, bpf, folder=embedding_folder)
+    with open(embedding_filename, 'rb') as f:
+        embedding = pickle.load(f)
+    parameters = [latpos, 'sigma_beta_T'] if edge_type == 'con' and set_sigma is None else [latpos]
+    get_pred_func = lambda i, state: get_obs_samples(i, state, parameters, embedding)
+    key, predictions = jax.lax.fori_loop(0, n_particles, get_pred_func, (key, jnp.zeros((n_particles, M))))
+    return key, embedding, predictions
+
 ll_f = get_con_log_likelihood if edge_type == 'con' else get_bin_log_likelihood
 
 ### Get data that was trained on
@@ -157,122 +192,179 @@ else:
 task_filename = get_filename_with_ext(task_filename, ext='txt', folder=data_folder)
 obs, tasks, encs = load_observations(data_filename, task_filename, subject1, subjectn, M)
 
-for si, n_sub in enumerate(range(subject1, subjectn+1)):
-    for ti, task in enumerate(tasks):
-        print(f"Running S{n_sub}, {task}")
-        ### Load embedding and get distances
-        
-        embedding_filename = get_filename_with_ext(f"{edge_type}_{geometry}_S{n_sub}_{task}_embedding_{base_data_filename}{sigma_txt}", partial, bpf, folder=embedding_folder)
-        with open(embedding_filename, 'rb') as f:
-            embedding = pickle.load(f)
+n_subjects, n_tasks, n_obs = subjectn+1-subject1, len(tasks), len(encs)
+prediction_errors = np.zeros((n_subjects, n_tasks, n_particles, n_obs))
 
-        distance_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd')  # -> (n_particles, M)
+if only_predict: ### Voor grote runs wil ik niet 100 plaatjes, maar wel 100 predictions
+    for si, n_sub in enumerate(range(subject1, subjectn + 1)):
+        for ti, task in enumerate(tasks):
+            key, embedding, predictions = get_predictions(key, n_sub, task)
+            get_sse = lambda i, state: (state[0].at[i].set(np.sum((obs[si, ti] - state[1][i]) ** 2)), state[1])
+            for oi in range(n_obs):
+                sse, _ = jax.lax.fori_loop(0, n_particles, get_sse, (np.zeros(n_particles), predictions))
+                prediction_errors[si, ti, :, oi] = sse
+else: ## maar soms ook wel plaatjes
+    for si, n_sub in enumerate(range(subject1, subjectn+1)):
+        for ti, task in enumerate(tasks):
+            print(f"Running S{n_sub}, {task}")
+            key, embedding, predictions = get_predictions(key, n_sub, task)
 
-        d_avg = np.mean(distance_trace, axis=0) # -> (M,)
-        d_avg = triu2mat(d_avg)
+            distance_trace = get_attribute_from_trace(embedding.particles[latpos], det_params_func, 'd')  # -> (n_particles, M)
 
-        ### Sort distance matrix by lobe
-        lobes = [l[1].split(';')[0] for l in plt_labels]
-        idc = np.argsort(lobes)
-        d_sorted = np.zeros((N, N))
-        for row in range(N):
-            d_sorted[row] = d_avg[idc[row]][idc]
+            d_avg = np.mean(distance_trace, axis=0) # -> (M,)
+            d_avg = triu2mat(d_avg)
 
-        ordered = np.sort(lobes)
-        uordered = np.unique(ordered)
-        first_idc = [list(ordered).index(ul) for ul in uordered]
+            ### Sort distance matrix by lobe
+            lobes = [l[1].split(';')[0] for l in plt_labels]
+            idc = np.argsort(lobes)
+            d_sorted = np.zeros((N, N))
+            for row in range(N):
+                d_sorted[row] = d_avg[idc[row]][idc]
 
-        plt.figure()
-        plt.imshow(d_sorted, cmap=cmap)
-        plt.yticks(ticks=first_idc, labels=uordered)
-        plt.xticks(ticks=first_idc, labels=uordered, rotation=75)
-        ax = plt.gca()
-        ax.xaxis.tick_top()
-        plt.title(f"Distance matrix sorted by lobe\nS{n_sub} {task}")
-        savename = get_filename_with_ext(f"dist_matrix_by_lobe_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
-        plt.savefig(savename, bbox_inches='tight')
-        plt.close()
-        
-        ### Make shuffled distance distribution checks
-        if do_shuffle:
-            sigma_T_trace = embedding.particles['sigma_beta_T'] if edge_type == 'con' else None
-            embedding_log_likelihoods = jnp.zeros(n_particles)
-            get_ll = lambda i, ll: ll_f(i,ll, distances=distance_trace, obs=obs[si, ti], sigma_T_trace=sigma_T_trace) ## Curry the observations, distance and sigma
-            embedding_log_likelihoods = jax.lax.fori_loop(0, n_particles, get_ll, embedding_log_likelihoods)
-            emb_hist, emb_bins = jnp.histogram(embedding_log_likelihoods, bins=n_embedding_bins, density=True)
-
-            ### Shuffle each particle's distance matrix n_shuffle times
-            ### THIS IS TOO BIG TO BE IN ONE BIG FORI_LOOP! :(
-            shuffled_log_likelihoods = jnp.zeros((n_particles * n_shuffle))
-            for i in range(n_particles):
-                key, subkey = jax.random.split(key)
-                shuffled_distances = jax.random.permutation(subkey, np.tile(distance_trace[i], (n_shuffle, 1)), axis=1, independent=True) # -> (n_shuffle, M)
-                get_ll = lambda i, ll: ll_f(i,ll, distances=shuffled_distances, obs=obs[si, ti], sigma_T_trace=sigma_T_trace)
-                start, end = i*n_shuffle, (i+1)*n_shuffle
-                shuffled_log_likelihoods = shuffled_log_likelihoods.at[start:end].set(jax.lax.fori_loop(0, n_shuffle, get_ll, jnp.zeros((n_shuffle))))
-            shuf_hist, shuf_bins = jnp.histogram(shuffled_log_likelihoods, bins=n_shuffle_bins, density=True)
+            ordered = np.sort(lobes)
+            uordered = np.unique(ordered)
+            first_idc = [list(ordered).index(ul) for ul in uordered]
 
             plt.figure()
-            plt.stairs(emb_hist, emb_bins, fill=True, label='embedding', color='red', alpha=plot_alpha)
-            plt.stairs(shuf_hist, shuf_bins, fill=True, label='shuffled', color='tab:gray', alpha=plot_alpha)
-            plt.xlabel('log-likelihood')
-            plt.ylabel('density')
-            plt.title(f"S{n_sub} {task}")
-            plt.legend()
-            plt.tight_layout()
-            savename = get_filename_with_ext(f"emb_vs_shuf_loglikelihood_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
-            plt.savefig(savename)
+            plt.imshow(d_sorted, cmap=cmap)
+            plt.yticks(ticks=first_idc, labels=uordered, fontsize=tick_fontsize)
+            plt.xticks(ticks=first_idc, labels=uordered, rotation=75, fontsize=tick_fontsize, ha='right')
+            cbar = plt.colorbar()
+            # cbar.ax.set_yticklabels(fontsize=tick_fontsize)
+            ax = plt.gca()
+            ax.xaxis.tick_top()
+            # plt.title(f"Distance matrix sorted by lobe\nS{n_sub} {task}")
+            # plt.title(f"S{n_sub} {task}")
+            savename = get_filename_with_ext(f"dist_matrix_by_lobe_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+            plt.savefig(savename, bbox_inches='tight')
             plt.close()
 
-        ### Make prior predictive check
-        # Create data from embedding
-        parameters = [latpos, 'sigma_beta_T'] if edge_type == 'con' and set_sigma is None else [latpos]
-        get_pred_func = lambda i, state: get_obs_samples(i, state, parameters, embedding)
-        start = time.time()
-        key, predictions = jax.lax.fori_loop(0, n_particles, get_pred_func, (key, jnp.zeros((n_particles, M)))) # love a good 4-stack
-        end = time.time()
+            ### Make shuffled distance distribution checks
+            if do_shuffle:
+                sigma_T_trace = embedding.particles['sigma_beta_T'] if edge_type == 'con' else None
+                embedding_log_likelihoods = jnp.zeros(n_particles)
+                get_ll = lambda i, ll: ll_f(i,ll, distances=distance_trace, obs=obs[si, ti], sigma_T_trace=sigma_T_trace) ## Curry the observations, distance and sigma
+                embedding_log_likelihoods = jax.lax.fori_loop(0, n_particles, get_ll, embedding_log_likelihoods)
+                emb_hist, emb_bins = jnp.histogram(embedding_log_likelihoods, bins=n_embedding_bins, density=True)
 
-        # Get average correlation and sort by those edges
-        avg_corr = jnp.mean(obs[si, ti], axis=0)  ## -> (M,)
-        pred_sort = jnp.argsort(avg_corr)
+                ### Shuffle each particle's distance matrix n_shuffle times
+                ### THIS IS TOO BIG TO BE IN ONE BIG FORI_LOOP! :(
+                shuffled_log_likelihoods = jnp.zeros((n_particles * n_shuffle))
+                for i in range(n_particles):
+                    key, subkey = jax.random.split(key)
+                    shuffled_distances = jax.random.permutation(subkey, np.tile(distance_trace[i], (n_shuffle, 1)), axis=1, independent=True) # -> (n_shuffle, M)
+                    get_ll = lambda i, ll: ll_f(i,ll, distances=shuffled_distances, obs=obs[si, ti], sigma_T_trace=sigma_T_trace)
+                    start, end = i*n_shuffle, (i+1)*n_shuffle
+                    shuffled_log_likelihoods = shuffled_log_likelihoods.at[start:end].set(jax.lax.fori_loop(0, n_shuffle, get_ll, jnp.zeros((n_shuffle))))
+                shuf_hist, shuf_bins = jnp.histogram(shuffled_log_likelihoods, bins=n_shuffle_bins, density=True)
 
-        # Get averages over the predictions
-        avg_prediction = jnp.mean(predictions, axis=0)
-        plt_avg_pred = avg_prediction[pred_sort]
-        std_prediction = jnp.std(predictions, axis=0)
-        plt_std_pred = std_prediction[pred_sort]
+                plt.figure()
+                plt.stairs(emb_hist, emb_bins, fill=True, label='embedding', color='red', alpha=plot_alpha)
+                plt.stairs(shuf_hist, shuf_bins, fill=True, label='shuffled', color='tab:gray', alpha=plot_alpha)
+                plt.xlabel('log-likelihood')
+                plt.ylabel('density')
+                # plt.title(f"S{n_sub} {task}")
+                plt.legend()
+                plt.tight_layout()
+                savename = get_filename_with_ext(f"emb_vs_shuf_loglikelihood_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+                plt.savefig(savename)
+                plt.close()
 
-        # Plot fake data
-        x_plt = np.arange(M)
-        plt.figure()
-        plt.xlabel('edge index')
-        plt.ylabel('correlation')
-        plt.scatter(x_plt, plt_avg_pred, s=1, color='royalblue', alpha=plot_alpha, label='average predicted')
-        plt.fill_between(x_plt, plt_avg_pred - plt_std_pred, plt_avg_pred + plt_std_pred, color='lightskyblue', alpha=plot_alpha, label='std predicted')
+            ### Make prior predictive check
+            get_sse = lambda i, state: (state[0].at[i].set(np.sum((obs[si, ti] - state[1][i]) ** 2)), state[1])
+            ei = si*n_tasks+ti
+            for oi in range(n_obs):
+                sse, _ = jax.lax.fori_loop(0, n_particles, get_sse, (np.zeros(n_particles), predictions))
+                prediction_errors[ei, :, oi] = sse
 
-        # Plot observations (later because z-order)
-        for oi, obs_i in enumerate(obs[si, ti]):
-            sc = plt.scatter(x_plt, obs_i[pred_sort], s=1, color='pink', alpha=plot_alpha)
-        sc.set_label('observed') # Set only last once
-        plt.scatter(x_plt, avg_corr[pred_sort], s=1, color='red', label='average observed')
-        plt.legend()
-        plt.title(f"S{n_sub} {task} edges ordered by average edge weight")
-        plt.tight_layout()
-        savename = get_filename_with_ext(f"{edge_type}_{geometry}_posterior_predictive_check_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
-        plt.savefig(savename)
-        plt.close()
+            # Get average correlation and sort by those edges
+            avg_obs = jnp.mean(obs[si, ti], axis=0)  ## -> (M,)
+            pred_sort = jnp.argsort(avg_obs)
 
-        ## Same but with imshows
-        fig, axs = plt.subplots(2)
-        fig.suptitle(f"S{n_sub} {task}")
-        axs[0].imshow(triu2mat(avg_corr), cmap=cmap)
-        axs[0].set_title("Average observed edge weight")
-        axs[0].axis('off')
+            # Get averages over the predictions
+            avg_prediction = jnp.mean(predictions, axis=0)
+            plt_avg_pred = avg_prediction[pred_sort]
+            std_prediction = jnp.std(predictions, axis=0)
+            plt_std_pred = std_prediction[pred_sort]
 
-        axs[1].imshow(triu2mat(avg_prediction), cmap=cmap)
-        axs[1].set_title("Average predicted edge weight")
-        axs[1].axis('off')
+            # Plot fake data
+            x_plt = np.arange(M)
+            plt.figure()
+            plt.xlabel('edge index', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize, ha='right', rotation=45)
+            ylab = 'correlation' if edge_type == 'con' else 'edge value'
+            plt.ylabel(ylab, fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
+            s = 2
+            bigs = 15
+            farout = 1000
+            plt.scatter(x_plt, plt_avg_pred, s=s, color='royalblue', alpha=plot_alpha)
+            # plt.fill_between(x_plt, plt_avg_pred - plt_std_pred, plt_avg_pred + plt_std_pred, color='lightskyblue', alpha=plot_alpha, label='std predicted')
 
-        savename = get_filename_with_ext(f"{edge_type}_{geometry}_imshow_posterior_predictive_check_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
-        plt.savefig(savename, bbox_inches='tight')
-        plt.close()
+            # Plot observations (later because z-order)
+            for oi, obs_i in enumerate(obs[si, ti]):
+                sc = plt.scatter(x_plt, obs_i[pred_sort], s=s, color='pink', alpha=plot_alpha)
+            plt.scatter(x_plt, avg_obs[pred_sort], s=s, color='red')
+
+            xmin, xmax = plt.xlim()
+            plt.scatter(-farout, .5, s=bigs, color='royalblue', alpha=plot_alpha, label='average prediction')
+            plt.scatter(-farout, .5, s=bigs, color='pink', alpha=plot_alpha, label='observation')
+            plt.scatter(-farout, .5, s=bigs, color='red', label='average observation')
+            plt.legend(fontsize=label_fontsize, bbox_to_anchor=(1.0, 1.0))
+            # plt.title(f"S{n_sub} {task} edges ordered by average edge weight")
+            # plt.title(f"S{n_sub} {task}")
+            savename = get_filename_with_ext(f"{edge_type}_{geometry}_ppc_edges_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+            plt.savefig(savename, bbox_inches='tight')
+            plt.close()
+
+            ## Same but with imshows
+            fig, axs = plt.subplots(2)
+            fig.suptitle(f"S{n_sub} {task}")
+            axs[0].imshow(triu2mat(avg_obs), cmap=cmap)
+            axs[0].set_title("Average observation")
+            axs[0].axis('off')
+
+            axs[1].imshow(triu2mat(avg_prediction), cmap=cmap)
+            axs[1].set_title("Average prediction")
+            axs[1].axis('off')
+
+            savename = get_filename_with_ext(f"{edge_type}_{geometry}_imshow_ppc_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+            plt.savefig(savename, bbox_inches='tight')
+            plt.close()
+
+            ## Difference imshow:
+            pred_diff = triu2mat(avg_prediction) - triu2mat(avg_obs)
+            pred_diff_sorted = np.zeros((N, N))
+            for row in range(N):
+                pred_diff_sorted[row] = pred_diff[idc[row]][idc]
+
+            plt.figure()
+            plt.imshow(pred_diff_sorted, cmap=cmap, vmin=-1, vmax=1)
+            plt.yticks(ticks=first_idc, labels=uordered, fontsize=tick_fontsize)
+            plt.xticks(ticks=first_idc, labels=uordered, rotation=75, fontsize=tick_fontsize)
+            cbar = plt.colorbar()
+            # cbar.ax.set_yticklabels(fontsize=tick_fontsize)
+            ax = plt.gca()
+            ax.xaxis.tick_top()
+            savename = get_filename_with_ext(f"{edge_type}_{geometry}_imshow_diff_ppc_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+            plt.savefig(savename, bbox_inches='tight')
+            plt.close()
+
+            ## Same but actual vs predicted scatterplot.
+            plt.figure()
+            plt.scatter(avg_obs, avg_prediction, s=1, c='k')
+            plt.xlabel('Average observation', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            plt.ylabel('Average prediction', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
+            savename = get_filename_with_ext(f"{edge_type}_{geometry}_scatter_ppc_S{n_sub}_{task}_{base_data_filename}", ext='png', partial=partial, bpf=bpf, folder=figure_folder)
+            plt.savefig(savename, bbox_inches='tight')
+            plt.close()
+
+if save_errors:
+    with open(error_savename, 'wb') as f:
+        pickle.dump(prediction_errors, f)
+
+    avg_prediction_errors = np.mean(prediction_errors, axis=2) # Take average over particles.
+    with open(avg_error_savename, 'wb') as f:
+        pickle.dump(avg_prediction_errors, f)

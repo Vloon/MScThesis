@@ -225,7 +225,7 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, mu:ArrayLike=mu, sigma:float=sig
     """
     key, z_key, sigma_key, = jax.random.split(key, 3)
     z = sigma * jax.random.normal(z_key, shape=shape) + mu
-    sigma_beta_T = jax.lax.select(overwrite_sigma_val is not None, overwrite_sigma_val, sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma)
+    sigma_beta_T = overwrite_sigma_val if overwrite_sigma_val is not None else sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma
     
     prior = {'z': z,
              'sigma_beta_T': sigma_beta_T}
@@ -486,7 +486,7 @@ if __name__ == "__main__":
 
             # Save sigma values
             if save_sigma_chain and overwrite_sigma_val is None:
-                filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=f"{data_folder}/sbt_traces")
+                filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=get_safe_folder(f"{data_folder}/sbt_traces"))
                 with open(filename, 'wb') as f:
                     pickle.dump(sigma_trace[:n_iter], f)
 

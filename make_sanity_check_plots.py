@@ -16,12 +16,12 @@ from continuous_hyperbolic_LSM import get_det_params as con_hyp_det_params
 from plotting_functions import plot_sigma_convergence
 
 arguments = [('-df', 'data_folder', str, 'Data'), # data folder
-             ('-conbdf', 'con_base_data_filename', str, 'processed_data'),  # the most basic version of the filename of the continuous saved data
-             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_max_0.05unconnected'), # the most basic version of the filename of the binary saved data
+             ('-conbdf', 'con_base_data_filename', str, 'processed_data_downsampled_evenly_spaced'),  # the most basic version of the filename of the continuous saved data
+             ('-binbdf', 'bin_base_data_filename', str, 'binary_data_downsampled_evenly_spaced_max_0.05unconnected'), # the most basic version of the filename of the binary saved data
              ('-overwritedf', 'overwrite_data_filename', str, None),  # if used, it overwrites the default filename
              ('-if', 'base_input_folder', str, 'Embeddings'), # base input folder of the embeddings
-             ('-np', 'n_particles', int, 1000), # number of particles used in the embedding
-             ('-nm', 'n_mcmc_steps', int, 100), # number of mcmc steps used in the embedding
+             ('-np', 'n_particles', int, 2000), # number of particles used in the embedding
+             ('-nm', 'n_mcmc_steps', int, 500), # number of mcmc steps used in the embedding
              ('-tf', 'task_filename', str, 'task_list'), # filename of the list of task names
              ('-of', 'output_folder', str, 'Figures/sanity_checks'), # folder where to dump figures
              ('-gtf', 'gt_folder', str, None), # folder of the ground truths to plot true distances
@@ -38,11 +38,17 @@ arguments = [('-df', 'data_folder', str, 'Data'), # data folder
              ('--partial', 'partial', bool), # whether to use partial correlations
              ('--bpf', 'bpf', bool), # whether to use band-pass filtered correlations
              ('--reg', 'add_regression', bool), # whether to add a regression line in the distance v correlation plot
+             ('-lfs', 'label_fontsize', float, 20),  # fontsize of labels (and legend)
+             ('-tfs', 'tick_fontsize', float, 16),  # fontsize of the tick labels
+             ('-wsz', 'wrapsize', float, 20),  # wrapped text width
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
 global_params = get_cmd_params(arguments)
 set_GPU(global_params['gpu'])
+label_fontsize = global_params['label_fontsize']
+tick_fontsize = global_params['tick_fontsize']
+wrapsize = global_params['wrapsize']
 data_folder = global_params['data_folder']
 edge_type = global_params['edge_type']
 geometry = global_params['geometry']
@@ -88,16 +94,16 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
     for ti, task in enumerate(tasks):
         if edge_type == 'con' and set_sigma is None:
             ## Load and plot sigma convergence
-            sigma_filename = get_filename_with_ext(f"con_{geometry}_{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=data_folder)
+            sigma_filename = get_filename_with_ext(f"con_{geometry}_{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=f"{data_folder}/sbt_traces")
             with open(sigma_filename, 'rb') as f:
                 sigma_chain = pickle.load(f)
 
             plt.figure(figsize=(20,10))
             ax = plt.gca()
-            ax = plot_sigma_convergence(sigma_chain, ax=ax, legend=False)
-            plt.xlabel('SMC iteration')
-            plt.ylabel('Sigma/bound')
-            plt.title(f"Sigma convergence for S{n_sub} {task}")
+            ax = plot_sigma_convergence(sigma_chain, ax=ax, legend=False, label_fontsize=label_fontsize, tick_fontsize=tick_fontsize)
+            plt.xlabel('SMC iteration', fontsize=label_fontsize)
+            plt.ylabel(r'$\sigma$/bound', fontsize=label_fontsize)
+            # plt.title(f"$\sigma$ convergence for S{n_sub} {task}")
             plt.tight_layout()
             figure_filename = get_filename_with_ext(f"{edge_type}_{geometry}_sigma_convergence_S{n_sub}_{task}", ext='png', partial=partial, folder=output_folder)
             plt.savefig(figure_filename)
@@ -151,8 +157,10 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                 ymin, ymax = plt.ylim()
                 plt.vlines(gt_sigma_div_bound, ymin, ymax, colors='r', label='Ground truth')
                 plt.legend()
-            plt.xlabel('sigma / bound')
-            plt.ylabel('count')
+            plt.xlabel(r'$\sigma$/bound', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            plt.ylabel('Density', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             plt.title(title)
             plt.tight_layout()
             plt.savefig(output_file)
@@ -180,8 +188,10 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                 right = max(jnp.max(gt_bound_bins), right)
             plt.ylim(0, top+ymargin)
             plt.xlim(left-xmargin, right+xmargin)
-            plt.xlabel('bound')
-            plt.ylabel('count')
+            plt.xlabel('Bound', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            plt.ylabel('Count', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             plt.title(title)
             if ground_truth:
                 plt.legend()
@@ -206,8 +216,10 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                 plt.legend()
             plt.ylim(0, top+ymargin)
             plt.xlim(left - xmargin, right + xmargin)
-            plt.xlabel('sigma')
-            plt.ylabel('count')
+            plt.xlabel(r'$\sigma$', fontsize=label_fontsize)
+            plt.xticks(fontsize=tick_fontsize)
+            plt.ylabel('Density', fontsize=label_fontsize)
+            plt.yticks(fontsize=tick_fontsize)
             plt.title(title)
             if ground_truth:
                 plt.legend()
@@ -232,7 +244,7 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                     x = np.linspace(xmin, xmax, M)
                     y = reg.intercept_ + reg.coef_ * x
                     plt.plot(x, y, color='r')
-                plt.title(title)
+                # plt.title(title)
                 plt.savefig(output_file, bbox_inches='tight')
                 plt.close()
 
@@ -245,15 +257,17 @@ for si, n_sub in enumerate(range(subject1, subjectn + 1)):
                 title = f"Distance vs {partial_txt}correlation\nS{n_sub} {task} {enc}\nParticle {ppsi}"
                 plt.figure()
                 plt.scatter(distances, correlations, s=0.5, c='k', alpha=plot_alpha)
-                plt.xlabel('Distance')
-                plt.ylabel('Correlation')
+                plt.xlabel('Distance', fontsize=label_fontsize)
+                plt.xticks(fontsize=tick_fontsize)
+                plt.ylabel('Correlation', fontsize=label_fontsize)
+                plt.yticks(fontsize=tick_fontsize)
                 if add_regression:
-                    reg = LinearRegression().fit(distances.reshape((M,1)), correlations)
-                    xmin, xmax = plt.xlim()
-                    x = np.linspace(xmin, xmax, M)
-                    y = reg.intercept_ + reg.coef_*x
-                    plt.plot(x, y, color='r')
-                plt.title(title)
+                    _, xmax = plt.xlim()
+                    x = np.linspace(0, xmax, M)
+                    y = np.exp(-x ** 2)
+                    plt.plot(x, y, linestyle='dashed', color='r', label=r'$\exp\left(-d^2\right)$')
+                    plt.legend(fontsize=label_fontsize)
+                # plt.title(title)
                 plt.tight_layout()
                 plt.savefig(output_file)
                 plt.close()

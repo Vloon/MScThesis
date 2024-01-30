@@ -10,6 +10,9 @@ arguments = [('-y', 'y_name', str, 'lml'),
              ('-fol', 'figure_folder', str, 'Figures/metric_plots'),
              ('-fig', 'figure_file', str, 'metric'),
              ('-t', 'plt_type', str, 'scatter'),
+             ('-lfs', 'label_fontsize', float, 20),  # fontsize of labels (and legend)
+             ('-tfs', 'tick_fontsize', float, 16),  # fontsize of the tick labels
+             ('-wsz', 'wrapsize', float, 20),  # wrapped text width
              ('--all', 'plot_all', bool),
              ]
 
@@ -20,6 +23,9 @@ figure_folder = global_params['figure_folder']
 figure_file = global_params['figure_file']
 plt_type = global_params['plt_type']
 plot_all = global_params['plot_all']
+label_fontsize = global_params['label_fontsize']
+tick_fontsize = global_params['tick_fontsize']
+wrapsize = global_params['wrapsize']
 
 # All possible names we want to plot against lml
 x_names = ['n_particles', 'n_mcmc_steps', 'task']
@@ -44,7 +50,7 @@ if plot_all:
                 if label_by != x_name and label_by != y_name: # We're not sorting by a value already plotted
                     plt_label_by = plt_names[label_by] if label_by in plt_names else None
                     for plt_type in ['scatter', 'bar', 'box']:
-                        plt.figure(figsize=(10,10))
+                        plt.figure(figsize=(13,10))
                         ax = plt.gca()
                         ax = plot_metric(csv_file=filename,
                                          x_name=x_name,

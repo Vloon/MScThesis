@@ -251,14 +251,18 @@ def plot_posterior(pos_trace:ArrayLike,
         ax = plt.gca()
         clean_ax = False
     if pos_labels is not None: # Prep position labels
+        bad_labels = ['NaN', 'nan', '']
         hemispheres = [lab[0] for lab in pos_labels]
         brain_regions = [lab[1] for lab in pos_labels]
+        bad_idc = [i for i, br in enumerate(brain_regions) if br in bad_labels]
+        has_bad_labels = len(bad_idc) > 0
         if one_region:
             brain_regions = [br.split(';')[0] for br in brain_regions]
         unique_hemis = list(np.unique(hemispheres))
         unique_regions = list(np.unique(brain_regions))
         ubr_colors = [plt.get_cmap(brainregion_cmap)(i) for i in np.linspace(0,1,len(unique_regions))]
-        br_colors = [ubr_colors[unique_regions.index(br)] for br in brain_regions]
+
+        br_colors = [ubr_colors[unique_regions.index(br)] if i not in bad_idc else '0.75' for i, br in enumerate(brain_regions)]
         assert len(unique_hemis) == len(hemisphere_symbols), f'Length of hemisphere_symbols should match unique number of hemispheres in the label file but they are {len(hemisphere_symbols)} and {len(unique_hemis)} respectively.'
 
     margin = 1 + margin
@@ -285,7 +289,7 @@ def plot_posterior(pos_trace:ArrayLike,
 
     ### TOP: Plot node means
     if pos_labels is not None: # Add position labels
-        coord = margin*disk_radius*10 # gewoon ver weg
+        coord = margin*disk_radius*10 
         marker_edgewidth = min(np.sqrt(s), s**2)/5 # edge width doesn't seem to visually scale linearly with the size of the marker, but we also need to deal with s < 1
         s_lab = max(np.sqrt(s), s**2)*1.5
         ## Create legend (the sizes are just purely vibes based, I don't understand why the markers are not consistent in size)
@@ -297,15 +301,17 @@ def plot_posterior(pos_trace:ArrayLike,
                        label=hs,
                        ) # Plot one invisible point per marker for plotting
         for j, br in enumerate(unique_regions):
-            ax.scatter(coord, coord,
-                       s=s_lab,
-                       marker='o',
-                       color=ubr_colors[j],
-                       edgecolor='k',
-                       linewidth=marker_edgewidth,
-                       label=br,
-                       ) # Plot one invisible point per color for plotting
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=5)
+            if br not in bad_labels:
+                ax.scatter(coord, coord,
+                           s=s_lab,
+                           marker='o',
+                           color=ubr_colors[j],
+                           edgecolor='k',
+                           linewidth=marker_edgewidth,
+                           label=br,
+                           ) # Plot one invisible point per color for plotting
+        ncol = (len(unique_hemis)+len(unique_regions))//2
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0), ncol=ncol)
         ## Plot the actual data
         for n in range(N):
             hs_idx = unique_hemis.index(pos_labels[n][0])
@@ -447,6 +453,8 @@ def plot_metric(csv_file:str,
                 ax:Axes=None,
                 color:str='#a3b23b',
                 alpha:float=0.8,
+                label_fontsize:float=20,
+                tick_fontsize:float=16
                 ):
     """
     Plots an independent parameter on the x-axis versus a dependent parameter on the y-axis. The latter can act as a metric of performance, like log-marginal likelihood or runtime
@@ -464,6 +472,8 @@ def plot_metric(csv_file:str,
     ax : the axis to plot on
     color : the color of the points
     alpha : the alpha of the points
+    label_fontsize : fontsize of the labels and legends
+    tick_fontsize : fontsize of the x/y ticks
     """
     valid_plt_types = ['scatter', 'bar', 'box']
     assert plt_type in valid_plt_types, f"plt_type must be in {valid_plt_types} but is {plt_type}"
@@ -494,14 +504,15 @@ def plot_metric(csv_file:str,
         ax = plt.gca()
 
     # Only rotate strings
-    rotation = 45 if type(x_val[0]) in [np.str_, str] else 0 ## Okay this is ugly but x_val.dtype = '<U1' while this gives np.str_
+    rotation = 45 if type(x_val[0]) in [np.str_, str] else 0
     if plt_type == 'scatter':
         if label_by is not None:
             unique_labels = np.unique(label_val)
             for i, ul in enumerate(unique_labels):
                 idc = np.where(label_val == ul)
-                plt.scatter(x_val[idc], y_val[idc], alpha=alpha, label=f'{plt_label_by} = {ul}')
-                plt.legend()
+                plt.scatter(x_val[idc], y_val[idc], alpha=alpha, label=ul)
+                plt.legend(fontsize=label_fontsize, bbox_to_anchor=(0.6,1.0)).set_title(title=plt_label_by, prop={'size': label_fontsize})
+
         else:
             plt.scatter(x_val, y_val, c=color, alpha=alpha)
             plt.xticks(rotation=rotation)
@@ -527,9 +538,9 @@ def plot_metric(csv_file:str,
                         height = mean_y[:,j],
                         yerr = std_y[:,j],
                         align='center',
-                        label=f'{plt_label_by} = {ul}')
+                        label=ul)
             plt.xticks(ticks=x_plt, labels=unique_x, rotation=rotation)
-            plt.legend()
+            plt.legend(fontsize=label_fontsize).set_title(title=plt_label_by, prop={'size':label_fontsize})
         else:
             # Get the means and std of the LML values, ordered by x value
             unique_x = np.unique(x_val)
@@ -553,8 +564,10 @@ def plot_metric(csv_file:str,
                     notch=True,
                     positions=x_plt)
         plt.xticks(x_plt, labels=unique_x, rotation=rotation)
-    plt.xlabel(plt_x_name)
-    plt.ylabel(plt_y_name)
+    plt.xlabel(plt_x_name, fontsize=label_fontsize)
+    plt.ylabel(plt_y_name, fontsize=label_fontsize)
+    plt.xticks(fontsize=tick_fontsize)
+    plt.yticks(fontsize=tick_fontsize)
     return ax
 
 def plot_correlations(corr:ArrayLike,
@@ -593,8 +606,10 @@ def plot_sigma_convergence(sigma_chain:ArrayLike,
                            x_offset:float = 0.5,
                            x_tick_interval:int = None,
                            hcolor:str='tab:gray',
-                           true_sigma_label:str='True sigma/bound',
-                           legend:bool=True) -> Axes:
+                           true_sigma_label:str=r"True $\sigma$/bound",
+                           legend:bool=True,
+                           label_fontsize:float=20,
+                           tick_fontsize:float=16) -> Axes:
     """
     Plots the convergence of sigma as the sequence of SMC distributions
     PARAMS:
@@ -607,6 +622,7 @@ def plot_sigma_convergence(sigma_chain:ArrayLike,
     hcolor : color of the histograms
     true_sigma_label : legend label for the true sigma line
     legend : whether to add a legend
+    label_fontsize : fontsize of the labels and legend
     """
     if ax is None:
         plt.figure(20, 10)
@@ -623,11 +639,12 @@ def plot_sigma_convergence(sigma_chain:ArrayLike,
         x_start = it * (1 + x_offset)
         ax.stairs(sigma_hist_nml + x_start, sigma_bins, baseline=x_start, fill=True, color=hcolor, orientation='horizontal')
 
-    ax.set_xticks(ticks=[it * (1 + x_offset) for it in range(n_iter)][::x_tick_interval], labels=np.arange(n_iter)[::x_tick_interval])
+    ax.set_xticks(ticks=[it * (1 + x_offset) for it in range(n_iter)][::x_tick_interval], labels=np.arange(n_iter)[::x_tick_interval], fontsize=tick_fontsize)
+    plt.yticks(fontsize=tick_fontsize)
     xmin, xmax = 0, (n_iter + 1) * (1 + x_offset)
     if true_sigma is not None:
-        ax.hlines(invlogit(true_sigma), xmin, xmax, 'red', 'dashed', label=true_sigma_label)
+        ax.hlines(invlogit(true_sigma), xmin, xmax, 'tab:red', label=true_sigma_label)
     ax.set_xlim(xmin, xmax)
     if legend:
-        ax.legend()
+        ax.legend(fontsize=label_fontsize)
     return ax

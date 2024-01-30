@@ -12,6 +12,8 @@ from jax._src.typing import ArrayLike
 from typing import Callable, Tuple
 
 from binary_euclidean_LSM import sample_prior as bin_euc_sample_prior, sample_observation as bin_euc_sample_observation, get_det_params as bin_euc_det_params
+from binary_hyperbolic_LSM import sample_prior as bin_hyp_sample_prior, sample_observation as bin_hyp_sample_observation, get_det_params as bin_hyp_det_params
+from continuous_euclidean_LSM import sample_prior as con_euc_sample_prior, sample_observation as con_euc_sample_observation, get_det_params as con_euc_det_params
 from continuous_hyperbolic_LSM import sample_prior as con_hyp_sample_prior, sample_observation as con_hyp_sample_observation, get_det_params as con_hyp_det_params
 
 arguments = [('-df', 'base_data_filename', str, 'prior_data'),  # the most basic version of the filename of the saved data
@@ -23,7 +25,7 @@ arguments = [('-df', 'base_data_filename', str, 'prior_data'),  # the most basic
              ('-ntasks', 'n_tasks', int, 1), # number of "tasks"
              ('-nobs', 'n_observations', int, 2), # number of observations sampled
              ('-eps', 'eps', float, 1e-5), # clipping value in a whole bunch of continuous functions
-             ('-obseps', 'obs_eps', float,1e-12), # clipping value for the observations in the continuous models
+             ('-obseps', 'obs_eps', float,1e-7), # clipping value for the observations in the continuous models
              ('-mu', 'mu', float, 0.), # mean for the positions' normal distribution
              ('-sig', 'sigma', float, 1.), # standard deviation for the positions' normal distribution
              ('-musig', 'mu_sigma', float, 0.), # mean of the logit-transformed std of the beta distribution
@@ -76,19 +78,25 @@ latpos = '_z' if geometry == 'hyp' else 'z'
 ## Take the correct prior and observation sampling functions (and parameter getter)
 sample_prior_dict = {
                      'bin_euc':bin_euc_sample_prior,
+                     'bin_hyp':bin_hyp_sample_prior,
+                     'con_euc':con_euc_sample_prior,
                      'con_hyp':con_hyp_sample_prior,
                     }
 sample_prior_func = sample_prior_dict[f"{edge_type}_{geometry}"]
 
 sample_obs_dict = {
                    'bin_euc':bin_euc_sample_observation,
+                   'bin_hyp':bin_hyp_sample_observation,
+                   'con_euc':con_euc_sample_observation,
                    'con_hyp':con_hyp_sample_observation,
                   }
 sample_obs_func = sample_obs_dict[f"{edge_type}_{geometry}"]
 
 get_det_params_dict = {
-                        'bin_euc': bin_euc_det_params,
-                        'con_hyp': con_hyp_det_params
+                        'bin_euc':bin_euc_det_params,
+                        'bin_hyp':bin_hyp_det_params,
+                        'con_euc':con_euc_det_params,
+                        'con_hyp':con_hyp_det_params,
                        }
 get_det_params = get_det_params_dict[f"{edge_type}_{geometry}"]
 
@@ -98,7 +106,9 @@ big_dict = {'mu':mu, 'sigma':sigma, 'mu_sigma':mu_sigma, 'sigma_sigma':sigma_sig
 ## Allow overwriting of certain parameters. If value is None, it will be ignored.
 overwrite_param_dict = {
                         'bin_euc': {},
-                        'con_hyp': {'sigma_beta_T':sigma_beta_T}
+                        'bin_hyp': {},
+                        'con_euc': {'overwrite_sigma_val':sigma_beta_T},
+                        'con_hyp': {'overwrite_sigma_val':sigma_beta_T},
                        }
 overwrite_params = overwrite_param_dict[f"{edge_type}_{geometry}"]
 
@@ -137,11 +147,7 @@ def create_data(key:PRNGKeyArray,
     overwrite_params : dictionary containing all parameters you want to overwrite
     """
     ## Sample prior
-    key, gt_prior = sample_prior_func(key, shape, **params)
-    ## Overwrite parameters
-    for dict_key, value in overwrite_params.items():
-        if value is not None:
-            gt_prior[dict_key] = value
+    key, gt_prior = sample_prior_func(key, shape, **params, **overwrite_params)
     ## Sample observations
     key, observations = sample_obs_func(key, gt_prior, n_observations, **params)
     return key, gt_prior, observations
@@ -186,7 +192,7 @@ for si in range(1,n_subjects+1):
         if make_plot:
             ## Plot flat observations
             plt.figure()
-            plt.imshow(observations, cmap=plt.cm.plasma)
+            plt.imshow(observations, cmap=plt.cm.plasma, aspect='auto')
             plt.xlabel('Edge')
             plt.ylabel('Observation')
             title = f"Flat observation ({ppt[edge_type]} {ppt[geometry]})"
