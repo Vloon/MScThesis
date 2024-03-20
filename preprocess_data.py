@@ -1,5 +1,5 @@
 """
-Calling this file performs the preprocessing of the raw HCP data.
+Calling this file performs the preprocessing of the raw HCP data. The original zipfiles have been renamed S1.zip .. S100.zip. 
 """
 
 import numpy as np
