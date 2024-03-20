@@ -1,18 +1,23 @@
+"""
+This file contains a large number of plotting functions that are used. The functions in this file only return the plt axes, and don't actually save the plots themselves.
+"""
+
+## Basics
 import os
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc, Ellipse
 import matplotlib.colors as mcolors
-
 import jax.numpy as jnp
-
 import numpy as np
 
+## Typing
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
-from matplotlib import axes as Axes # I want types to be capitalized for some reason.
+from matplotlib import axes as Axes
 from typing import Tuple, Callable
 from blackjax.smc.tempered import TemperedSMCState
 
+## Self-made functions
 from helper_functions import triu2mat, invlogit
 
 def plot_hyperbolic_edges(p:ArrayLike,
@@ -24,6 +29,7 @@ def plot_hyperbolic_edges(p:ArrayLike,
                           zorder:float=0,
                           overwrt_alpha:float=None) -> Axes:
     """
+    Plots the edges on the Poincaré disk, meaning these will look curved.
     PARAMS
     p (N,2) : points on the Poincaré disk
     A (N,N) or (M) : (upper triangle of the) adjacency matrix.
@@ -35,10 +41,11 @@ def plot_hyperbolic_edges(p:ArrayLike,
     """
     def mirror(p:ArrayLike, R:float=1) -> ArrayLike:
         """
-        Mirrors point p in circle with R = 1
+        Mirrors point p in circle with radius R
         Based on: https://math.stackexchange.com/questions/1322444/how-to-construct-a-line-on-a-poincare-disk
         PARAMS:
             p (N,2) : N points on a 2-dimensional Poincaré disk
+            R : disk radius
         RETURNS:
             p_inv (N,2) : Mirror of p
         """
@@ -53,7 +60,7 @@ def plot_hyperbolic_edges(p:ArrayLike,
         Based on: https://www.allmath.com/perpendicularbisector.php
         PARAMS:
             p (N,2) : List of points
-            R : Size of the disk
+            R : disk radius
         RETURNS:
             a_self (N*(N+1)/2) : Slopes of the bisectors for each combination of points in p
             b_self (N*(N+1)/2) : Intersects of the bisectors for each combination of points in p
@@ -64,29 +71,28 @@ def plot_hyperbolic_edges(p:ArrayLike,
         assert D == 2, 'Cannot visualize a Poincaré disk with anything other than 2 dimensional points'
         triu_indices = np.triu_indices(N, k=1)
 
-        # Get mirror of points
+        ## Get mirror of points
         p_inv = mirror(p, R)
 
-        # Tile to get all combinations
+        ## Tile the points to get all combinations
         x_rep = np.tile(p[:,0], N).reshape((N,N))
         y_rep = np.tile(p[:,1], N).reshape((N,N))
 
-        # Get midpoints
+        ## Get midpoints
         mid_x_self = ((x_rep.T+x_rep)/2)[triu_indices]
         mid_y_self = ((y_rep.T+y_rep)/2)[triu_indices]
         mid_x_inv  = (p[:,0]+p_inv[:,0])/2
         mid_y_inv  = (p[:,1]+p_inv[:,1])/2
 
-        # Get slopes
+        ## Get slopes
         dx_self = (x_rep - x_rep.T)[triu_indices]
         dy_self = (y_rep- y_rep.T)[triu_indices]
         dx_inv  = p[:,0] - p_inv[:,0]
         dy_inv  = p[:,1] - p_inv[:,1]
-
         a_self = -1/(dy_self/dx_self)
         a_inv  = -1/(dy_inv/dx_inv)
 
-        # Get intersects
+        ## Get intersects
         b_self = -a_self*mid_x_self + mid_y_self
         b_inv  = -a_inv*mid_x_inv + mid_y_inv
 
@@ -98,20 +104,20 @@ def plot_hyperbolic_edges(p:ArrayLike,
     N, D = p.shape
     M = N*(N-1)//2
     assert D == 2, 'Cannot visualize a Poincaré disk with anything other than 2 dimensional points'
-    if len(A.shape) == 2: # Get the upper triangle
+    if len(A.shape) == 2:
         A = A[np.triu_indices(N, k=1)]
 
     ## Calculate perpendicular bisectors for points in p with each other, and with their mirrors.
-    a_self, b_self, a_inv, b_inv  = bisectors(p,R)
+    a_self, b_self, a_inv, b_inv = bisectors(p,R)
 
-    # Repeat elements according to the upper triangle indices
+    ## Repeat elements according to the upper triangle indices
     first_triu_idc = np.triu_indices(N,k=1)[0]
     a_inv_rep = np.array([a_inv[i] for i in first_triu_idc])
     b_inv_rep = np.array([b_inv[i] for i in first_triu_idc])
     px_rep = np.array([p[i,0] for i in first_triu_idc])
     py_rep = np.array([p[i,1] for i in first_triu_idc])
 
-    # Get coordinates and radius of midpoint of the circle
+    ## Get coordinates and radius of midpoint of the circle
     cx = (b_self-b_inv_rep)/(a_inv_rep-a_self)
     cy = a_self*cx + b_self
     cR = np.sqrt((px_rep-cx)**2 + (py_rep-cy)**2)
@@ -120,17 +126,18 @@ def plot_hyperbolic_edges(p:ArrayLike,
     qx_rep = np.array([p[i,0] for i in second_triu_idc])
     qy_rep = np.array([p[i,1] for i in second_triu_idc])
 
+    ## Get starting and ending angles of the arcs
     theta_p = np.degrees(np.arctan2(py_rep-cy, px_rep-cx))
     theta_q = np.degrees(np.arctan2(qy_rep-cy, qx_rep-cx))
 
     for m in range(M):
         if A[m] >= threshold:
-            # Honestly... can't really tell you why this works but it does so someone else can do the math.
+            ## Correct the angles for quadrant wraparound
             if cx[m] > 0:
                 theta_p[m] = theta_p[m]%360
                 theta_q[m] = theta_q[m]%360
 
-            # Draw arc
+            ## Draw the arc and add it to the axis
             alpha = A[m] if overwrt_alpha is None else overwrt_alpha
             arc = Arc(xy=(cx[m], cy[m]), width=2*cR[m], height=2*cR[m], angle=0, theta1=min(theta_p[m],theta_q[m]), theta2=max(theta_p[m],theta_q[m]), linewidth=linewidth, alpha=alpha, zorder=zorder)
             ax.add_patch(arc)
@@ -145,7 +152,7 @@ def plot_euclidean_edges(p:ArrayLike,
                          zorder:float=0,
                          overwrt_alpha:float=None) -> Axes:
     """
-    Plots for all entries in A
+    Plots Euclidean edges between points in p.
     PARAMS:
     p : (N, 2) positions of the nodes
     A : (M,) or (N, N) adjacency matrix (or its upper triangle)
@@ -161,6 +168,7 @@ def plot_euclidean_edges(p:ArrayLike,
     if ax is None:
         plt.figure()
         ax = plt.gca()
+    ## Get variables in the right shape
     if len(A.shape) == 2:
         N = A.shape[0]
         assert A.shape[1] == N, f'A must be of size ({N},{N}), but is {A.shape}.'
@@ -174,12 +182,13 @@ def plot_euclidean_edges(p:ArrayLike,
         triu_indices = np.triu_indices(N, k=1)
     else:
         raise ValueError(f'A should have 1 or 2 dimensions, but has {len(A.shape)}.')
-        
+
     for m in range(M):
         if A[m] >= threshold:
             alpha = A[m] if overwrt_alpha is None else overwrt_alpha
             p1 = p[triu_indices[0][m], :]
             p2 = p[triu_indices[1][m], :]
+            ## Plot edge as a straight line
             ax.plot([p1[0], p2[0]],
                     [p1[1], p2[1]],
                     color='k',
@@ -205,14 +214,16 @@ def plot_posterior(pos_trace:ArrayLike,
                    mean_zorder:float=10,
                    max_th_digits:int=4,
                    margin:float=0.1,
-                   s:float=10,
+                   s:float=20,
                    alpha_margin:float=5e-3,
                    marker_color:str='0.6',
                    brainregion_cmap:str='jet',
                    one_region:bool=True,
-                   hemisphere_symbols:ArrayLike=['+', 'x']) -> Axes:
+                   hemisphere_symbols:ArrayLike=['+', 'x'],
+                   legend_fontsize:float=18,
+                   zoom:bool=False) -> Axes:
     """
-    Plots a network with the given positions.
+    Plots the posterior positions, possibly including the networks' edges.
     PARAMS:
     pos_trace : (n_steps, N, D+1) trace of the positions
     edges : (M,) edge weight or binary edges between positions. If None, no edges are drawn.
@@ -220,7 +231,7 @@ def plot_posterior(pos_trace:ArrayLike,
     ax : axis to plot the network in
     title : title to display
     edge_width : width of the edges
-    disk_radius : the radius of the size of the plot
+    disk_radius : the disk radius, doubling as the x- and y-limits of the plot
     hyperbolic : whether the network should be plotted in hyperbolic space or Euclidean space
     continuous : whether the edge weights are continuous or binary
     bkst : whether to deal with the first two nodes as Bookstein nodes
@@ -234,8 +245,11 @@ def plot_posterior(pos_trace:ArrayLike,
     brainregion_cmap : cmap string to color the brain regions
     one_region : whether to commit each brain region to one lobe only, rather than splitting certain nodes over multiple regions
     hemisphere_symbols : list of plt marker symbols used for the different hemispheres
+    legend_fontsize : fontsize used in the legend.
+    zoom : whether the image is zoomed (meaning the legend should shift upwards)
     """
-    pos_trace = np.array(pos_trace) # Convert to Numpy, probably from JAX.Numpy
+    ## Convert possible JAX.numpy arrays to numpy
+    pos_trace = np.array(pos_trace)
     n_steps, N, D = pos_trace.shape
     assert D == 2, f'Dimension must be 2 to be plotted, but is {D}. If plotting hyperbolic, convert to Poincaré coordinates beforehand.'
     if pos_labels is not None:
@@ -250,58 +264,63 @@ def plot_posterior(pos_trace:ArrayLike,
         plt.figure(facecolor='w')
         ax = plt.gca()
         clean_ax = False
-    if pos_labels is not None: # Prep position labels
-        bad_labels = ['NaN', 'nan', '']
+    ## Prepare position labels and colors
+    if pos_labels is not None:
+        empty_labels = ['NaN', 'nan', '']
         hemispheres = [lab[0] for lab in pos_labels]
         brain_regions = [lab[1] for lab in pos_labels]
-        bad_idc = [i for i, br in enumerate(brain_regions) if br in bad_labels]
-        has_bad_labels = len(bad_idc) > 0
+        empty_idc = [i for i, br in enumerate(brain_regions) if br in empty_labels]
+        has_empty_labels = len(empty_idc) > 0
         if one_region:
             brain_regions = [br.split(';')[0] for br in brain_regions]
         unique_hemis = list(np.unique(hemispheres))
         unique_regions = list(np.unique(brain_regions))
         ubr_colors = [plt.get_cmap(brainregion_cmap)(i) for i in np.linspace(0,1,len(unique_regions))]
 
-        br_colors = [ubr_colors[unique_regions.index(br)] if i not in bad_idc else '0.75' for i, br in enumerate(brain_regions)]
+        br_colors = [ubr_colors[unique_regions.index(br)] if i not in empty_idc else '0.75' for i, br in enumerate(brain_regions)]
         assert len(unique_hemis) == len(hemisphere_symbols), f'Length of hemisphere_symbols should match unique number of hemispheres in the label file but they are {len(hemisphere_symbols)} and {len(unique_hemis)} respectively.'
 
     margin = 1 + margin
 
-    pos_mean = np.mean(pos_trace, axis=0) # N,D average position
-    pos_std = np.std(pos_trace, axis=0) # N,D position standard deviation
-    pos_std_nml = pos_std/np.max(pos_std+alpha_margin) # Normalize so that the max standard deviation is just under 1 which then corresponds to most transparant point
+    ## Get position means and stds, and normalize so that the maximum standard deviation is just under 1 which then corresponds to most transparant point.
+    pos_mean = np.mean(pos_trace, axis=0)
+    pos_std = np.std(pos_trace, axis=0)
+    pos_std_nml = pos_std/np.max(pos_std+alpha_margin)
     
-    ### BOTTOM: Add edges
+    ## Bottom layer: Add edges
     if edges is not None:
         if hyperbolic:
-            if bkst:  # Add small jitter to Bookstein coordinates for plottability
+            if bkst:
+                ## Add small jitter to Bookstein coordinates for plottability
                 pos_mean[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
             ax = plot_hyperbolic_edges(p=pos_mean, A=edges, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold, zorder=edge_zorder, overwrt_alpha=edge_alpha)
         else:
             ax = plot_euclidean_edges(pos_mean, edges, ax, edge_width, threshold=threshold, zorder=edge_zorder, overwrt_alpha=edge_alpha)
 
-    ### MID: Plot standard deviations
+    ## Middle layer: Plot standard deviations
     ell_colors = br_colors if pos_labels is not None else ['r']*N
     for n in range(N):
         alpha = 1 - float(np.max(pos_std_nml[n,:]))
         ell = Ellipse((pos_mean[n,0], pos_mean[n,1]), width=pos_std[n,0], height=pos_std[n,1], alpha=0.8, color=ell_colors[n], fill=True, zorder=std_zorder)
         ax.add_patch(ell)
 
-    ### TOP: Plot node means
-    if pos_labels is not None: # Add position labels
+    ## Top layer: Plot node means
+    if pos_labels is not None:
+        ## To create the legend, we plot one point per marker far outsize the range we look at.
         coord = margin*disk_radius*10 
-        marker_edgewidth = min(np.sqrt(s), s**2)/5 # edge width doesn't seem to visually scale linearly with the size of the marker, but we also need to deal with s < 1
-        s_lab = max(np.sqrt(s), s**2)*1.5
-        ## Create legend (the sizes are just purely vibes based, I don't understand why the markers are not consistent in size)
+        marker_edgewidth = min(np.sqrt(s), s**2)/5 # Edge width doesn't seem to visually scale linearly with the size of the marker, but we also need to deal with s < 1.
+        s_lab = max(np.sqrt(s), s**2)*2 # (the point sizes are decided visually, since markers don't seem to be consistent in size)
+        ## Create left vs right hemisphere markers
         for i, hs in enumerate(unique_hemis):
             ax.scatter(coord, coord,
                        s=s_lab,
                        marker=hemisphere_symbols[i],
                        color=marker_color,
                        label=hs,
-                       ) # Plot one invisible point per marker for plotting
+                       )
+        ## Create lobe markers
         for j, br in enumerate(unique_regions):
-            if br not in bad_labels:
+            if br not in empty_labels:
                 ax.scatter(coord, coord,
                            s=s_lab,
                            marker='o',
@@ -309,9 +328,10 @@ def plot_posterior(pos_trace:ArrayLike,
                            edgecolor='k',
                            linewidth=marker_edgewidth,
                            label=br,
-                           ) # Plot one invisible point per color for plotting
+                           )
         ncol = (len(unique_hemis)+len(unique_regions))//2
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, 0), ncol=ncol)
+        bbox_anchor = (0.5, 0.1) if zoom else (0.5, 0)
+        ax.legend(loc='upper center', bbox_to_anchor=bbox_anchor, ncol=ncol, fontsize=legend_fontsize)
         ## Plot the actual data
         for n in range(N):
             hs_idx = unique_hemis.index(pos_labels[n][0])
@@ -323,14 +343,17 @@ def plot_posterior(pos_trace:ArrayLike,
                        linewidth=marker_edgewidth,
                        zorder=mean_zorder,
                        )
-    else: # Just plot the positions as default
-        if bkst:  # Make bookstein coordinates red
+    else:
+        ## Without labels, just plot the positions as default
+        if bkst:
+            ## Color Bookstein anchors red
             ax.scatter(pos_mean[:2, 0], pos_mean[:2, 1], c='r', s=s, zorder=mean_zorder)
             ax.scatter(pos_mean[2:, 0], pos_mean[2:, 1], c='k', s=s, zorder=mean_zorder)
         else:
             ax.scatter(pos_mean[:, 0], pos_mean[:, 1], c='k', s=s, zorder=mean_zorder)
 
-    if title: # Both None and empty string will be False
+    if title:
+        ## Create fitting title
         if threshold > 0 and continuous:
             thr_tit = round(threshold, max_th_digits) if len(str(threshold)) > max_th_digits else threshold
             title = f"{title}\nthreshold = {thr_tit}"
@@ -372,7 +395,7 @@ def plot_network(A: ArrayLike,
     threshold : minimum edge weight for the edge to be plotted
     margin : percentage of disk radius to be added as whitespace
     """
-    # Convert possibly jax numpy arrays to numpy arrays
+    ## Convert possibly JAX.numpy arrays to numpy arrays
     A = np.array(A)
     pos = np.array(pos)
 
@@ -396,15 +419,17 @@ def plot_network(A: ArrayLike,
         d = np.sum(A, axis=0)
         node_size = [v ** 2 / 10 for v in d]
 
-    # Draw the nodes
+    ## Draw the nodes
     ax.scatter(pos[:, 0], pos[:, 1],
                s=node_size,
                c=node_color,
                linewidths=2.0)
 
     if hyperbolic:
-        if bkst:  # Add jitter to Bookstein coordinates to avoid dividing by zero
+        if bkst:
+            ## Add jitter to Bookstein coordinates to avoid dividing by zero
             pos[:2, :] += np.random.normal(0, 1e-6, size=(2, 2))
+        ## Plot edges
         ax = plot_hyperbolic_edges(p=pos, A=A, ax=ax, R=disk_radius, linewidth=edge_width, threshold=threshold)
     else:
         ax = plot_euclidean_edges(p=pos, A=A, ax=ax, linewidth=edge_width)
@@ -417,28 +442,6 @@ def plot_network(A: ArrayLike,
     ax.axis('off')
     if not clean_ax:
         plt.tight_layout()
-    return ax
-
-def plot_log_marginal_likelihoods(lml:ArrayLike, n_particles:ArrayLike, n_mcmc_steps:ArrayLike, ax:Axes=None):
-    """
-    Plots a heatmap of the log marginal likelihoods for different numbers of particles x different numbers of mcmc steps
-    PARAMS:
-    lml : (T,N,M) matrix containing log marginal likelihoods for each task by each number of particles by each number of mcmc steps
-    n_particles : (N,) list of number of particles used
-    n_mcmc_steps : (M,) list of number of mcmc steps used
-    """
-    T, N, M = lml.shape
-    assert len(n_particles) == N, f'n_particles must be of length {N} but is {len(n_particles)}.'
-    assert len(n_mcmc_steps) == M, f'n_mcmc_steps must be of length {N} but is {len(n_mcmc_steps)}.'
-    if ax is None:
-        plt.figure(figsize=(figsize,figsize))
-        ax = plt.gca()
-    lml_avg = jnp.mean(lml, axis=0)
-    ax.imshow(lml_avg)
-    plt.xlabel('Number of particles')
-    plt.ylabel('Number of MCMC steps')
-    ax.set_xticks(n_particles)
-    ax.set_yticks(n_mcmc_steps)
     return ax
 
 def plot_metric(csv_file:str,
@@ -460,7 +463,7 @@ def plot_metric(csv_file:str,
     Plots an independent parameter on the x-axis versus a dependent parameter on the y-axis. The latter can act as a metric of performance, like log-marginal likelihood or runtime
     Both x and y values are indicated by a name, which should be found in the header of the csv file (sub, n_particles, n_mcmc_steps, task, runtime)
     PARAMS:
-    csv_file : the location of the csv file containing the data (incl. folder). The csv starts with a row of headers, then a row of types
+    csv_file : the location of the csv file containing the data (incl. folder). The csv starts with a row of headers, then a row of types, then the data
     x_name : the name of the column in the CSV file to use as the value on the x-axis
     plt_x_name : plottable x-name to be used as label
     y_name : the name of the column in the CSV file to use as the value on the y-axis
@@ -477,7 +480,7 @@ def plot_metric(csv_file:str,
     """
     valid_plt_types = ['scatter', 'bar', 'box']
     assert plt_type in valid_plt_types, f"plt_type must be in {valid_plt_types} but is {plt_type}"
-    data = np.loadtxt(csv_file, delimiter=delim, dtype=str) # Save everything as string so we can keep multiple types in one csv
+    data = np.loadtxt(csv_file, delimiter=delim, dtype=str) # Everything is saved as a string
     headers = data[0,:]
     assert x_name in headers, f'x_name should be in {headers} but is {x_name}'
     assert y_name in headers, f'y_name should be in {headers} but is {y_name}'
@@ -486,16 +489,16 @@ def plot_metric(csv_file:str,
 
     plt_x_name = x_name if plt_x_name is None else plt_x_name
     plt_y_name = y_name if plt_y_name is None else plt_y_name
-    plt_label_by = label_by if plt_label_by is None else plt_label_by # If label_by is None this is still None
+    plt_label_by = label_by if plt_label_by is None else plt_label_by
 
-    types = [eval(d) for d in data[1,:]] # Eval casts the str version of a type to the type-cast function
+    ## Cast the str version of a type to the type-cast function
+    types = [eval(d) for d in data[1,:]]
     values = data[2:,:]
 
-    # Create dictionary with for each header as key the correctly typecast value
+    ## Create dictionary with for each header as key the correctly typecast value
     data_dict = {h:[types[i](v) for v in values[:,i]] for i, h in enumerate(headers)}
     y_val = np.array(data_dict[y_name])
     x_val = np.array(data_dict[x_name])
-    # Asserting x/y lengths is unnecessary, because the csv wouldn't load if they were different.
     if label_by is not None:
         label_val = np.array(data_dict[label_by])
 
@@ -503,7 +506,7 @@ def plot_metric(csv_file:str,
         plt.figure()
         ax = plt.gca()
 
-    # Only rotate strings
+    ## Rotate the strings
     rotation = 45 if type(x_val[0]) in [np.str_, str] else 0
     if plt_type == 'scatter':
         if label_by is not None:
@@ -517,9 +520,9 @@ def plot_metric(csv_file:str,
             plt.scatter(x_val, y_val, c=color, alpha=alpha)
             plt.xticks(rotation=rotation)
     elif plt_type == 'bar':
-        bar_width = 0.8 # WE SHOULDN'T GIVE THIS AS A USER DEFINED PARAMETER. This is the default.
+        bar_width = 0.8 # This is the plt default, and should not be changed.
         if label_by is not None:
-            # Get the means and std of the LML values, ordered by x value
+            ## Get the means and std of the dependent parameter, ordered by x value
             unique_x = np.unique(x_val)
             unique_labels = np.unique(label_val)
             mean_y = np.zeros((len(unique_x), len(unique_labels)))
@@ -527,7 +530,7 @@ def plot_metric(csv_file:str,
             for i, ux in enumerate(unique_x):
                 x_idc = np.array([i for i, x in enumerate(x_val) if x == ux])
                 for j, ul in enumerate(unique_labels):
-                    l_idc = np.array([i for i, l in enumerate(label_val) if l == ul]) # Use list comprehension because string == np.array returns a single Bool (probably because string is a character array)
+                    l_idc = np.array([i for i, l in enumerate(label_val) if l == ul])
                     idc_intersect = np.intersect1d(x_idc, l_idc)
                     mean_y[i,j] = np.mean(y_val[idc_intersect])
                     std_y[i,j] = np.std(y_val[idc_intersect])
@@ -542,7 +545,7 @@ def plot_metric(csv_file:str,
             plt.xticks(ticks=x_plt, labels=unique_x, rotation=rotation)
             plt.legend(fontsize=label_fontsize).set_title(title=plt_label_by, prop={'size':label_fontsize})
         else:
-            # Get the means and std of the LML values, ordered by x value
+            ## Get the means and std of the LML values, ordered by x value
             unique_x = np.unique(x_val)
             mean_y = np.zeros(len(unique_x))
             std_y = np.zeros(len(unique_x))
@@ -570,35 +573,30 @@ def plot_metric(csv_file:str,
     plt.yticks(fontsize=tick_fontsize)
     return ax
 
-def plot_correlations(corr:ArrayLike,
-                      ax:Axes=None,
-                      cmap:str='viridis',
-                      add_colorbar:bool=False,
-                      vmin:float=None,
-                      vmax:float=None) -> Axes:
+def plot_timeseries(timeseries:ArrayLike, y_offset:float=0.1, ax:Axes=None) -> Axes:
     """
-    Plots the correlations as a heat map
+    Creates a plot of the timeseries for each subject, task, and encoding.
     PARAMS:
-    corr : (N,N) or (M,) correlation matrix, or its upper triangle
-    ax : the axis to plot on
-    cmap : the color map of the heat map
-    add_colorbar : whether to add a colorbar as legend-ish thing
+    timeseries : (N, T) timeseries data 
+    y_offset : offset between timeseries 
+    ax : figure axis
     """
-    corr = np.array(corr)
-    assert len(corr.shape) in [1,2], f'corr must have 1 or 2 dimensions, but has {len(corr.shape)}'
-    if len(corr.shape) == 1:
-        corr = triu2mat(corr)
-    if ax is None:
-        plt.figure()
-        ax = plt.gca()
+    N, ts_len = timeseries.shape
+    ## Normalize each timeseries to fit within a -1 to 1 range
+    nrm_constant = np.tile(np.max(np.abs(timeseries), axis=1), (ts_len, 1)).T
+    nrm_ts = timeseries / nrm_constant
 
-    im = ax.imshow(corr, cmap=cmap, vmin=vmin, vmax=vmax)
+    ## Plot the timeseries
+    yticks = np.arange(N)*(2+y_offset)
+    for n in range(N):
+        ax.plot(np.arange(ts_len), nrm_ts[n]+yticks[n], color='k')
+    plt.yticks(yticks, [])
+    plt.ylim((yticks[0] - 1 - y_offset, yticks[-1] + 1 + y_offset))
+    plt.xlim((0, ts_len - 1))
+    
+    return ax, 
 
-    if add_colorbar:
-        ax.figure.colorbar(im, ax=ax)
-
-    return ax
-
+                
 def plot_sigma_convergence(sigma_chain:ArrayLike,
                            true_sigma:float = None,
                            ax:Axes=None,
@@ -611,10 +609,10 @@ def plot_sigma_convergence(sigma_chain:ArrayLike,
                            label_fontsize:float=20,
                            tick_fontsize:float=16) -> Axes:
     """
-    Plots the convergence of sigma as the sequence of SMC distributions
+    Plots the evolution of sigma as the sequence of distributions over SMC iterations.
     PARAMS:
     sigma_chain : (n_iter, n_particles) array of sigma proposals
-    true_sigma : if passed, will plot a red line to indicate the true sigma value (PRE-INVLOGIT).
+    true_sigma : if passed, will plot a red line to indicate the true sigma value (in logit-form).
     ax : the axis to plot on
     n_bins : number of bins per histogram
     x_tick_interval : how many-th iteration is ticked. If None is passed, it autoscales.
@@ -628,19 +626,26 @@ def plot_sigma_convergence(sigma_chain:ArrayLike,
         plt.figure(20, 10)
         ax = plt.gca()
 
+    ## Get tick values
     n_iter = len(sigma_chain)
     if x_tick_interval is None:
         x_tick_interval = n_iter//10
 
     for it in range(n_iter):
+        ## Create histogram for this iteration
         sigma_hist, sigma_bins = jnp.histogram(invlogit(sigma_chain[it]), bins=n_bins)
-        # Normalize so the peak is at 1
+        ## Normalize so the peak is at 1
         sigma_hist_nml = sigma_hist / jnp.max(sigma_hist)
+        ## Add some offset to not have the distributions touch
         x_start = it * (1 + x_offset)
+        ## Plot the distribution over the y-axis
         ax.stairs(sigma_hist_nml + x_start, sigma_bins, baseline=x_start, fill=True, color=hcolor, orientation='horizontal')
 
+    ## Set ticks
     ax.set_xticks(ticks=[it * (1 + x_offset) for it in range(n_iter)][::x_tick_interval], labels=np.arange(n_iter)[::x_tick_interval], fontsize=tick_fontsize)
     plt.yticks(fontsize=tick_fontsize)
+
+    ## Plot line for ground truth value
     xmin, xmax = 0, (n_iter + 1) * (1 + x_offset)
     if true_sigma is not None:
         ax.hlines(invlogit(true_sigma), xmin, xmax, 'tab:red', label=true_sigma_label)

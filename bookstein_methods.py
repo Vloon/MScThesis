@@ -1,7 +1,8 @@
+## Basics
 import jax
 import jax.numpy as jnp
 
-# Typing
+## Typing
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
 from blackjax.types import PyTree
@@ -19,7 +20,7 @@ def get_rigid_bookstein_anchors(n_dims:int = 2, offset:float = 0.3) -> jnp.ndarr
     """
     assert n_dims > 0, f"Bookstein anchors must be used in a latent space with at least 1 dimension, but is being used in a {n_dims} dimensional LS"
     assert offset > 0, f"Offset must be bigger than 0 but is {offset}"
-    bookstein_anchors = jnp.zeros(shape=(2, n_dims)) # for each dimension you need one bookstein coordinate, but only 2 can be rigid. Others must be restricted.
+    bookstein_anchors = jnp.zeros(shape=(2, n_dims)) # For each dimension you need one bookstein coordinate, but only 2 can be rigid. Others must be restricted.
     bookstein_anchors = bookstein_anchors.at[:,0].set([-offset, offset])
     return bookstein_anchors
 
@@ -41,33 +42,34 @@ def get_bookstein_anchors(_zb_x:float, n_dims:int = 2, offset:float = 0.3) -> jn
 
 def bookstein_position(pos:ArrayLike) -> ArrayLike:
     """
-    Turns a set of positions into bookstein coordinates, where the first position is constrained. The two Bookstein targets are implicit.
+    Turns a set of positions into bookstein coordinates, where the first position is constrained. The two Bookstein anchors are implicit.
     PARAMS:
-    pos : z or _z position in the latent space
+    pos : z or _z positions in the latent space.
     """
     n_nodes, n_dims = pos.shape
-    # Whether to flip that particle around the y-axis
-    _do_flip = pos[0,1] < 0 # Is first (third when counting implicit bkst) _z below x-axis?
-    do_flip = jnp.reshape(jnp.repeat(jnp.repeat(_do_flip, n_dims),n_nodes), (n_nodes, n_dims)) # Don't ask.
+    ## Whether to flip this particle around the y-axis (in the right shape). This method is clunky for 1 particle.
+    _do_flip = pos[0,1] < 0 # Is first (third when counting implicit anchors) _z below x-axis?
+    do_flip = jnp.reshape(jnp.repeat(jnp.repeat(_do_flip, n_dims),n_nodes), (n_nodes, n_dims))
 
-    # The flip operator over the x-axis
+    ## The flip operator over the x-axis (i.e. in the y-direction).
     _x_flip = jnp.array([1,-1])
     x_flip = jnp.tile(_x_flip, (n_nodes,1))
 
-    # Then flip over x-axis if flip, or keep the same if no flip
+    ## Then flip the positions over x-axis if we need to flip, or keep the positions the same if no flip.
     pos = pos*x_flip*do_flip + pos*(1-do_flip)
     return pos
 
 def bookstein_init(bkst_init:RMHState, prior:dict, log_density:Callable, latpos:str='_z') -> PyTree:
     """
-    Initializes the prior to start in bookstein position.
+    Initializes the prior to start in Bookstein position.
     PARAMS:
-    bkst_init : initialization function used of the RMH kernel
-    prior : prior dictionary containing positions _z
-    log_density : log density function to determine the probability of going to the proposed position
+    bkst_init : initialization function used of the RMH kernel.
+    prior : prior dictionary containing positions _z.
+    log_density : log density function to determine the probability of going to the proposed position.
+    latpos : latent position variable name ('z' for Euclidean, '_z' for hyperbolic).
     """
     N,D = prior[latpos].shape
-    assert N > D, "Must have more than D positions to use Bookstein coordinates, but N={} and D={}".format(N,D)
+    assert N > D, f"Must have more than D positions to use Bookstein coordinates, but N={N} and D={D}"
     prior[latpos] = prior[latpos][2:,:] # Cut off first two positions, the bookstein targets are implicit
     initial_state = bkst_init(position=prior, logprob_fn=log_density)
     initial_state.position[latpos] = bookstein_position(initial_state.position[latpos])
@@ -75,39 +77,41 @@ def bookstein_init(bkst_init:RMHState, prior:dict, log_density:Callable, latpos:
 
 def smc_bookstein_position(position:ArrayLike) -> ArrayLike:
     """
-    Turns a set of _z positions into bookstein coordinates, where the first two positions are set, and the third position is constrained.
+    Turns a set of latent positions into bookstein coordinates, where the third position is constrained to be above the x-axis.
     Keeps particle dimension in mind.
     PARAMS:
-    position : (P,N,D) N _z positions in the D-dimensional latent space for P particles
+    position : (P,N,D) latent positions for all P particles.
     """
     n_particles, n_nodes, n_dims = position.shape
     
-    # Whether to flip that particle around the y-axis
-    _do_y_flip = position[:,0,1] < 0 # Is first (third with implicit bkst coords) position below x-axis?
-    do_y_flip = jnp.reshape(jnp.repeat(jnp.repeat(_do_y_flip, n_dims),n_nodes), (n_particles, n_nodes, n_dims))
+    ## Whether to flip each particle around the x-axis. Takes the particle dimension into account.
+    _do_flip = position[:,0,1] < 0 # Is first (third when counting implicit anchors) position below x-axis?
+    do_flip = jnp.reshape(jnp.repeat(jnp.repeat(_do_flip, n_dims),n_nodes), (n_particles, n_nodes, n_dims))
 
-    # The flip operator over the x-axis
+    ## The flip operator over the x-axis.
     _x_flip = jnp.array([1,-1])
     x_flip = jnp.tile(_x_flip, (n_particles,n_nodes,1))
 
-    # Then flip over x-axis if flip, or keep the same if no flip
-    position = position*x_flip*do_y_flip + position*(1-do_y_flip)
+    ## Then flip the positions over x-axis if we need to flip, or keep the positions the same if no flip.
+    position = position*x_flip*do_flip + position*(1-do_flip)
     return position
 
 def add_bkst_to_smc_trace(trace:TemperedSMCState, bkst_dist:float, latpos:str='_z', D:int=2, is_array:bool=False) -> Union[TemperedSMCState,ArrayLike]:
     """
-    Adds the bookstein coordinates to the start of each position in the SMC trace.
+    Adds the Bookstein anchors to the start of each position in the SMC trace.
     PARAMS:
-    trace : the smc trace, must have a field .particles with key '_z' OR a (M x N x D) trace array
-    bkst_dist : Bookstein distance of the anchors
-    latpos : latent position variable name
-    D : number of latent space dimensions
-    is_array : whether the trace is an (n_steps, N-D, D) array
+    trace : the smc trace, must be an TemperedSMCState OR be a (M x N x D) trace array.
+    bkst_dist : Bookstein distance of the anchors.
+    latpos : latent position variable name.
+    D : number of latent space dimensions.
+    is_array : whether the trace is an (n_iter, N-D, D) array.
     """
+    ## Add Bookstein anchors to the array, the anchors must be rigid.
     if is_array:
         bkst_anchors = get_rigid_bookstein_anchors(D, bkst_dist)
         add_bkst = lambda c, s: (None, jnp.concatenate([bkst_anchors, s]))
         _, trace = jax.lax.scan(add_bkst, None, trace)
+    ## Add Bookstein anchors to the SMC state.
     else:
         n_particles, _N, D = trace.particles[latpos].shape
         cond = lambda state: state[0] < n_particles
@@ -126,18 +130,18 @@ def add_bkst_to_smc_trace(trace:TemperedSMCState, bkst_dist:float, latpos:str='_
         trace.particles[latpos] = new_particles
     return trace
 
-def smc_bkst_inference_loop(key: PRNGKeyArray, smc_kernel: Callable, initial_state: ArrayLike, max_iters: int=200) -> Tuple[PRNGKeyArray, int, float, TemperedSMCState]: ## <- klopt nie
+def smc_bkst_inference_loop(key: PRNGKeyArray, smc_kernel: Callable, initial_state: ArrayLike, max_iters: int=200) -> Union[Tuple[PRNGKeyArray, int, float, TemperedSMCState], Tuple[PRNGKeyArray, int, float, ArrayLike, TemperedSMCState]]:
     """
     Run the temepered SMC algorithm with Bookstein anchoring.
 
     Run the adaptive algorithm until the tempering parameter lambda reaches the value lambda=1.
     PARAMS:
-    key: random key for JAX functions
-    smc_kernel: kernel for the SMC particles
-    initial_state: beginning position of the algorithm
-    max_iters : maximum number of sigma iterations to save (if we save sigma at all)
+    key: random key for JAX functions.
+    smc_kernel: kernel for the SMC particles.
+    initial_state: beginning position of the algorithm.
+    max_iters : maximum number of sigma iterations to save (if we save sigma at all).
     """
-
+    ## Define the step function for the continuous models.
     if 'sigma_beta_T' in initial_state.particles:
         n_particles = initial_state.particles['sigma_beta_T'].shape[0]
         start_carry = (key, 0, 0., jnp.zeros((max_iters, n_particles, 1)), initial_state)
@@ -150,6 +154,7 @@ def smc_bkst_inference_loop(key: PRNGKeyArray, smc_kernel: Callable, initial_sta
             sigma_trace = sigma_trace.at[i].set(state.particles['sigma_beta_T'])
             lml += info.log_likelihood_increment
             return key, i+1, lml, sigma_trace, state
+    ## Define the step function for the binary models.
     else:
         start_carry = (key, 0, 0., initial_state)
 
@@ -160,9 +165,9 @@ def smc_bkst_inference_loop(key: PRNGKeyArray, smc_kernel: Callable, initial_sta
             state, info = smc_kernel(subkey, state)
             lml += info.log_likelihood_increment
             return key, i+1, lml, state
-        
+
+    ## Run the inference.
     cond = lambda carry: carry[-1].lmbda < 1
-        
     results  = jax.lax.while_loop(cond, step, start_carry)
 
     if results[1] > max_iters: # n_iter always stays in position 1

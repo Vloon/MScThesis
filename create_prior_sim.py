@@ -1,22 +1,35 @@
+"""
+Calling this file creates simulated data by sampling a ground truth prior, together with observations from that prior. These are both saved, and plotted. 
+"""
+
+## Basics
 import numpy as np
 import jax.numpy as jnp
 import jax
 import matplotlib.pyplot as plt
 import pickle
 
-from helper_functions import get_cmd_params, set_GPU, open_taskfile, get_safe_folder, get_filename_with_ext, invlogit, is_valid
-from plotting_functions import plot_correlations
-
+## Typing
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
 from typing import Callable, Tuple
+
+## Self-made functions
+from helper_functions import get_cmd_params, set_GPU, open_taskfile, get_safe_folder, get_filename_with_ext, invlogit, is_valid
+from plotting_functions import plot_correlations
 
 from binary_euclidean_LSM import sample_prior as bin_euc_sample_prior, sample_observation as bin_euc_sample_observation, get_det_params as bin_euc_det_params
 from binary_hyperbolic_LSM import sample_prior as bin_hyp_sample_prior, sample_observation as bin_hyp_sample_observation, get_det_params as bin_hyp_det_params
 from continuous_euclidean_LSM import sample_prior as con_euc_sample_prior, sample_observation as con_euc_sample_observation, get_det_params as con_euc_det_params
 from continuous_hyperbolic_LSM import sample_prior as con_hyp_sample_prior, sample_observation as con_hyp_sample_observation, get_det_params as con_hyp_det_params
 
-arguments = [('-df', 'base_data_filename', str, 'prior_data'),  # the most basic version of the filename of the saved data
+### Create cmd argument list (arg_name, var_name, type, default[OPT], nargs[OPT]).
+###  - arg_name is the name of the argument in the command line.
+###  - var_name is the name of the variable in the returned dictionary (which we re-use as variable name here).
+###  - type is the data-type of the variable.
+###  - default is the default value it takes if nothing is passed to the command line. This argument is only optional if type is bool, where the default is always False.
+###  - nargs is the number of arguments, where '?' (default) is 1 argument, '+' concatenates all arguments to 1 list. This argument is optional.
+arguments = [('-df', 'base_data_filename', str, 'prior_data'), # the most basic version of the filename of the saved data
              ('-of', 'output_folder', str, 'Data/prior_sim'), # folder where to dump data
              ('-fof', 'figure_output_folder', str, 'Figures/prior_sim'), # folder where to dump figures
              ('-tf', 'task_filename', str, 'task_list_prior_sim'), # filename of the list of task names WITHOUT EXTENSION
@@ -24,7 +37,7 @@ arguments = [('-df', 'base_data_filename', str, 'prior_data'),  # the most basic
              ('-nsub', 'n_subjects', int, 1), # number of "subjects"
              ('-ntasks', 'n_tasks', int, 1), # number of "tasks"
              ('-nobs', 'n_observations', int, 2), # number of observations sampled
-             ('-eps', 'eps', float, 1e-5), # clipping value in a whole bunch of continuous functions
+             ('-eps', 'eps', float, 1e-5), # clipping value in a number of functions
              ('-obseps', 'obs_eps', float,1e-7), # clipping value for the observations in the continuous models
              ('-mu', 'mu', float, 0.), # mean for the positions' normal distribution
              ('-sig', 'sigma', float, 1.), # standard deviation for the positions' normal distribution
@@ -42,7 +55,9 @@ arguments = [('-df', 'base_data_filename', str, 'prior_data'),  # the most basic
              ('-gpu', 'gpu', str, ''),  # number of gpu to use (in string form). If no GPU is specified, CPU is used.
              ]
 
+## Get arguments from command line.
 global_params = get_cmd_params(arguments)
+set_GPU(global_params['gpu']) ## MUST BE RUN FIRST
 base_data_filename = global_params['base_data_filename']
 edge_type = global_params['edge_type']
 assert edge_type in ['bin', 'con'], f"Edge type must be 'bin' (binary) or 'con' (continuous) but is {edge_type}"
@@ -68,14 +83,11 @@ sigma_beta_T = global_params['sigma_beta_T']
 do_print = global_params['do_print']
 make_plot = global_params['make_plot']
 cmap = global_params['cmap']
-set_GPU(global_params['gpu'])
-## After GPU is set
+## Use JAX functions only after setting the GPU, otherwise it will use all GPUs by default.
 key = jax.random.PRNGKey(global_params['seed'])
 
-## Define some things dependent on geometry or edge type
+## Define a number of variables based on geometry or edge type
 latpos = '_z' if geometry == 'hyp' else 'z'
-
-## Take the correct prior and observation sampling functions (and parameter getter)
 sample_prior_dict = {
                      'bin_euc':bin_euc_sample_prior,
                      'bin_hyp':bin_hyp_sample_prior,
@@ -100,8 +112,8 @@ get_det_params_dict = {
                        }
 get_det_params = get_det_params_dict[f"{edge_type}_{geometry}"]
 
-## All sample_prior functions start with key, shape as first two inputs
-big_dict = {'mu':mu, 'sigma':sigma, 'mu_sigma':mu_sigma, 'sigma_sigma':sigma_sigma, 'eps':eps, 'obs_eps':obs_eps}
+## Dictionary containing a number of universally used variables
+default_params = {'mu':mu, 'sigma':sigma, 'mu_sigma':mu_sigma, 'sigma_sigma':sigma_sigma, 'eps':eps, 'obs_eps':obs_eps}
 
 ## Allow overwriting of certain parameters. If value is None, it will be ignored.
 overwrite_param_dict = {
@@ -132,18 +144,18 @@ def create_data(key:PRNGKeyArray,
                 n_observations:int = n_observations,
                 sample_prior_func:Callable = sample_prior_func,
                 sample_obs_func:Callable = sample_obs_func,
-                params:dict = big_dict,
+                params:dict = default_params,
                 overwrite_params:dict = overwrite_params
                 ) -> Tuple[PRNGKeyArray, dict, jnp.array]:
     """
-    Samples a prior as ground truth and samples some observations
+    Samples a prior as ground truth and samples observations.
     PARAMS:
     key : random key for jax functions
-    shape : NxD nodes by latent space dimensions
+    shape : number of nodes by latent space dimensions
     n_observations : number of observations per ground truth
     sample_prior_func : function to sample the prior
     sample_obs_func : function to sample observations from the prior
-    params : dictionary containing all possible parameters your heart (aka sampling functions) could ever wish for
+    params : dictionary containing the parameters for the sampling functions
     overwrite_params : dictionary containing all parameters you want to overwrite
     """
     ## Sample prior
@@ -156,36 +168,30 @@ def create_data(key:PRNGKeyArray,
 sbt_txt = f"_sbt_{sigma_beta_T:.1f}" if sigma_beta_T is not None else ''
 task_filename = f"{task_filename}_N_{N}_n_obs_{n_observations}{sbt_txt}"
 output_task_filename = get_filename_with_ext(task_filename, ext='txt', folder=output_folder)
-data_filename = f"{base_data_filename}_N_{N}_n_obs_{n_observations}{sbt_txt}" # prior_data_N_10_n_obs_1
+data_filename = f"{base_data_filename}_N_{N}_n_obs_{n_observations}{sbt_txt}" 
 output_data_filename = get_filename_with_ext(data_filename, folder=output_folder)
 
 create_task_file(output_task_filename)
 
-# Pretty print text
+## Text and color QOL
 ppt = {'bin':'binary', 'con':'continuous', 'euc':'Euclidean', 'hyp':'hyperbolic'}
-
 colors = [plt.cm.plasma(i) for i in np.linspace(0, 1, n_observations)]
 
+## We use "subjects"/"tasks" in order to be in line with the structure of the embedding code, which expects subjects/tasks.
+## We save observations in a dictionary to be in line with the structure of the embedding code.
 sim_data = {}
-
 for si in range(1,n_subjects+1):
     for ti in range(n_tasks):
+        ## Create the ground truth prior and observations
         key, gt_prior, observations = create_data(key)
+
+        ## Save the ground truth prior
         gt_filename = get_filename_with_ext(f"gt_prior_{edge_type}_{geometry}_S{si}_T{ti}_N_{N}_n_obs_{n_observations}{sbt_txt}", folder=output_folder)
         with open(gt_filename, 'wb') as f:
             pickle.dump(gt_prior, f)
 
-        for oi, obs in enumerate(observations): # Observations has length n_observations.
-            if edge_type == 'con' and do_print:
-                valid, idc = is_valid(obs)
-                if not valid:
-                    print(f"  bad idc: {idc}")
-                valid = np.all(obs > 0) and np.all(obs < 1)
-                if not valid:
-                    idc = np.where(obs <= 0)
-                    print(f"  bad idc <= 0: \n\t{idc}\n\t{obs[idc]}")
-                    idc = np.where(obs >= 1)
-                    print(f"  bad idc >= 1: \n\t{idc}\n\t{obs[idc]}")
+        ## Save the observations to the dictionary
+        for oi, obs in enumerate(observations):
             dict_key = f"S{si}_T{ti}_obs{oi}"
             sim_data[dict_key] = obs
 
@@ -240,6 +246,7 @@ for si in range(1,n_subjects+1):
             savefile = get_filename_with_ext(f"gt_prior_edgeweights_S{si}_T{ti}_N_{N}_nobs_{n_observations}", ext='png', folder=figure_output_folder)
             plt.savefig(savefile)
             plt.close()
-            
+
+## Save the simulated observations
 with open(output_data_filename, 'wb') as f:
     pickle.dump(sim_data, f)

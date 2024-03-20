@@ -1,28 +1,24 @@
-# Home brew functions
-from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, get_attribute_from_trace, \
-    logit, invlogit, lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map, is_valid, get_plt_labels, print_versions, \
-    key2str, triu2mat
-from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace, smc_bkst_inference_loop
-from plotting_functions import plot_posterior, plot_network
-
-# Basics
+"""
+Calling this file embeds the specified continuous data into a hyperbolic latent space. 
+It saves the learned embedding, and possibly a plot of the latent positions, the chain of sigma_beta_T values, and certain statistics of the embedding. 
+"""
+## Basics
 import pickle
 import time
 import sys
 import os
 import csv
 import numpy as np
-
 import matplotlib.pyplot as plt
 
-# Sampling
+## Sampling
 import jax
 import jax.numpy as jnp
 import jax.scipy.stats as jstats
 import blackjax as bjx
 import blackjax.smc.resampling as resampling
 
-# Typing
+## Typing
 from jax._src.prng import PRNGKeyArray
 from jax._src.typing import ArrayLike
 from blackjax.types import PyTree
@@ -31,8 +27,15 @@ from blackjax.smc.tempered import TemperedSMCState
 from blackjax.smc.base import SMCInfo
 from typing import Callable, Tuple
 
-# Keep this here in case you somehow import the file and need these constants??
-eps = 1e-5 # If eps < 1e-5, rounding to zero can start to happen... DON'T TEMPT IT BOY!
+## Self-made functions
+from helper_functions import set_GPU, get_cmd_params, get_filename_with_ext, get_safe_folder, load_observations, get_attribute_from_trace, \
+    logit, invlogit, lorentz_to_poincare, hyp_pnt, lorentz_distance, parallel_transport, exponential_map, is_valid, get_plt_labels, print_versions, \
+    key2str, triu2mat
+from bookstein_methods import get_bookstein_anchors, bookstein_position, smc_bookstein_position, add_bkst_to_smc_trace, smc_bkst_inference_loop
+from plotting_functions import plot_posterior, plot_network
+
+## These are here to deal with the situation where you import the file and need these constants in function calls.
+eps = 1e-5 # If eps < 1e-5, rounding to zero starts happening.
 obs_eps = 1e-12
 mu = [0., 0.]
 sigma = 1.
@@ -66,8 +69,13 @@ seed = None
 gpu = ''
 
 if __name__ == "__main__":
-    # Create cmd argument list (arg_name, var_name, type, default, nargs[OPT])
-    arguments = [('-e', 'eps', float, eps),  # d->d_max offset
+    ### Create cmd argument list (arg_name, var_name, type, default[OPT], nargs[OPT]).
+    ###  - arg_name is the name of the argument in the command line.
+    ###  - var_name is the name of the variable in the returned dictionary (which we re-use as variable name here).
+    ###  - type is the data-type of the variable.
+    ###  - default is the default value it takes if nothing is passed to the command line. This argument is only optional if type is bool, where the default is always False.
+    ###  - nargs is the number of arguments, where '?' (default) is 1 argument, '+' concatenates all arguments to 1 list. This argument is optional.
+    arguments = [('-e', 'eps', float, eps),  # mu clipping value
                  ('-obseps', 'obs_eps', float, obs_eps), # observation clipping offset
                  ('-m', 'mu', float, mu, '+'),  # mean of distribution to sample _z
                  ('-s', 'sigma', float, sigma),  # std of distribution to sample _z
@@ -106,9 +114,9 @@ if __name__ == "__main__":
                  ('-gpu', 'gpu', str, gpu), # number of gpu to use (in string form). If no GPU is specified, CPU is used.
                  ]
 
-    # Get arguments from CMD
+    ## Get arguments from command line.
     global_params = get_cmd_params(arguments)
-    set_GPU(global_params['gpu']) ### MUST BE RUN FIRST
+    set_GPU(global_params['gpu']) ## MUST BE RUN FIRST
     eps = global_params['eps']
     obs_eps = global_params['obs_eps']
     mu = global_params['mu']
@@ -147,20 +155,28 @@ if __name__ == "__main__":
     seed_file = global_params['seed_file']
     seed = global_params['seed']
 
-    # Initialize JAX stuff
     if do_print:
         print_versions()
-
     if seed is None:
         with open(seed_file, 'r') as f:
             seed = int(f.read())
-    key = jax.random.PRNGKey(seed)
 
+    ## Use JAX functions only after setting the GPU, otherwise it will use all GPUs by default.
+    key = jax.random.PRNGKey(seed)
     mu = jnp.array(mu)
 
 overwrite_sigma_val = logit(overwrite_sigma_over_bound) if overwrite_sigma_over_bound is not None else None
 
-## Define functions to calculate the continuous hyperbolic parameters
+## Link functions
+def d_to_mu(d:ArrayLike, eps:float=eps) -> ArrayLike:
+    """
+    Returns the Beta mean mu given the latent distances d.
+    PARAMS:
+    d : (M,) latent distances.
+    eps : offset for calculating p, to insure 0 < p < 1.
+    """
+    return jnp.clip(jnp.exp(-d**2), eps, 1-eps)
+
 def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps, **kwargs) -> ArrayLike:
     """
     Calculates all deterministicly dependent parameters, up to and including the bound of sigma_beta, and returns those in a dictionary.
@@ -169,7 +185,7 @@ def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps, **kwargs) -> Ar
     _z : pre-hyperbolic projection latent positions
     mu : mean of the wrapped hyperbolic normal prior
     eps : offset for calculating d_norm, to insure max(d_norm) < 1
-    **kwargs allows us to pass non-used parameters, which is handy when we want to allow other files to use the con hyp model but also others and allow this function to just catch the parameters it needs
+    **kwargs allows us to pass non-used parameters, which is handy when we want to allow other files to use the con hyp model but also others and allow this function to just catch the parameters it needs.
     """
     N, D = _z.shape
     triu_indices = jnp.triu_indices(N, k=1)
@@ -177,21 +193,23 @@ def get_det_params(_z:ArrayLike, mu:ArrayLike=mu, eps:float=eps, **kwargs) -> Ar
     mu_0 = jnp.zeros((N, D+1))
     mu_0 = mu_0.at[:,0].set(1)
     
-    # Mu can be a value (e.g. 0) to indicate (0,0), or array-like (e.g. [0,0])
+    ## Mu can be a value (e.g. 0, counted for all dimensions), or array-like (e.g. [0,0]).
     if hasattr(mu, '__len__'):
         mu = jnp.array(mu)
         assert len(mu) == D, f"Dimension of mu (={len(mu)}) must correspond to the dimension of each point in _z (={D})"
         mu_tilde = jnp.reshape(jnp.tile(mu, N), (N,D))
     else:
         mu_tilde = mu*jnp.ones_like(_z)
-        
-    mu = hyp_pnt(mu_tilde) # UGLY?! How else to get a proper mean in H? Just kinda.. guess a correct H coordinate?
+
+    ## Project mu to the hyperbolic plane directly, then calculate z from _z.
+    mu = hyp_pnt(mu_tilde)
     v = jnp.concatenate([jnp.zeros((N,1)), _z], axis=1)
     u = parallel_transport(v, mu_0, mu)
     z = exponential_map(mu, u)
 
+    ## Calculate distances, Beta means, and bounds on sigma_beta
     d = lorentz_distance(z)[triu_indices]
-    mu_beta = jnp.clip(jnp.exp(-d**2), eps, 1-eps) # Clip means to be in (0,1) excl.
+    mu_beta = d_to_mu(d, eps=eps)
     bound = jnp.sqrt(mu_beta*(1-mu_beta))
 
     params = {'_z':_z,
@@ -205,8 +223,8 @@ def get_ab(mu_beta:ArrayLike, sigma_beta:ArrayLike, eps:float=eps) -> Tuple[Arra
     """
     Calculates the a and b parameters for the beta distribution
     PARAMS:
-    mu_beta : mean of the beta distribution
-    sigma_beta : standard deviations of the beta distribution
+    mu_beta : (M,) mean of the beta distribution
+    sigma_beta : standard deviation of the beta distribution
     eps : offset for calculating kappa, to ensure not dividing by zero
     """
     kappa = jnp.maximum(mu_beta*(1-mu_beta)/jnp.maximum(sigma_beta**2,eps) - 1, eps)
@@ -217,8 +235,8 @@ def get_ab(mu_beta:ArrayLike, sigma_beta:ArrayLike, eps:float=eps) -> Tuple[Arra
 ## Sampling functions
 def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, overwrite_sigma_val:float=overwrite_sigma_val, **kwargs) -> Tuple[PRNGKeyArray, dict]:
     """
-    Samples _z positions from the Wrapped Hyperbolic normal distribution (Nagano et al. 2019), as well as transformed stds of the beta distributions.
-    NOTE: the resulting _z positions are not in Bookstein form. If you want to sample in proper Bookstein form, you can't yet scuzi.
+    Samples _z positions from the Wrapped Hyperbolic normal distribution (Nagano et al. 2019), as well as transformed standard deviation of the beta distributions.
+    NOTE: the resulting _z positions are not in Bookstein form. This is only implemented for SMC.
     Returns the prior parameters in a dictionary.
     PARAMS:
     key : random key for JAX functions
@@ -228,7 +246,7 @@ def sample_prior(key:PRNGKeyArray, shape:tuple, sigma:float=sigma, mu_sigma:floa
     sigma_sigma : standard deviation of the 1D Gaussian to sample sigma_beta_T
     """
     key, _z_key, sigma_key = jax.random.split(key, 3)
-    _z = sigma*jax.random.normal(_z_key, shape=shape) # Is always centered at 0
+    _z = sigma*jax.random.normal(_z_key, shape=shape) # Is always centered at 0, as defined in the Lorentz model.
     sigma_beta_T = overwrite_sigma_val if overwrite_sigma_val is not None else sigma_sigma*jax.random.normal(sigma_key, (1,)) + mu_sigma
 
     prior = {'_z':_z,
@@ -243,25 +261,25 @@ def sample_observation(key:PRNGKeyArray, prior:dict, n_samples:int=1, mu:ArrayLi
     prior : dictionary containing sampled variables from the prior ('_z', 'sigma_beta_T')
     n_samples : number of observations to sample
     mu : mean of the positions' normal distribution
-    eps : offset for the normalization of d
-    obs_eps : offset for clipping A so that 0 < A < 1 instead of 0 <= A <= 1
+    eps : offset for clipping mu
+    obs_eps : offset for clipping A
     """
-    # Get prior position and sigma
+    ## Get prior position and sigma_T
     _z, sigma_beta_T = prior['_z'], prior['sigma_beta_T']
     N = _z.shape[0]
     M = N*(N-1)//2
 
-    # Calculate mu and bound
+    ## Calculate mu and bound
     params = get_det_params(_z, mu, eps=eps)
     mu_beta, bound = params['mu_beta'], params['bound']
     
-    # Transform sigma_beta back
+    ## Calculate sigma_beta
     sigma_beta = invlogit(sigma_beta_T)*bound
 
-    # Calculate a, b parameters
+    ## Calculate a, b parameters
     a, b = get_ab(mu_beta, sigma_beta, eps)
 
-    # Sample observations A, and clip between eps and 1-eps
+    ## Sample observations A, and clip
     key, subkey = jax.random.split(key)
     A = jnp.clip(jax.random.beta(subkey, a, b, shape=(n_samples, M)), obs_eps, 1.-obs_eps)
     return key, A
@@ -269,10 +287,10 @@ def sample_observation(key:PRNGKeyArray, prior:dict, n_samples:int=1, mu:ArrayLi
 ## Probability distributions
 def log_prior(_z:ArrayLike, sigma_beta_T:float, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, overwrite_sigma:bool=False) -> float:
     """
-    Returns the log-prior for a full _z state and sigma state, no Bookstein faffing.
+    Returns the log-prior for a full _z state and sigma state, without taking Bookstein anchors into account.
     PARAMS:
-    _z : pre-hyperbolic transformed positions
-    sigma_beta_T : transformed standard deviations of the beta distribution
+    _z : (N,D) latent positions
+    sigma_beta_T : transformed standard deviation of the beta distribution
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     mu_sigma : mean of the 1D Gaussian that samples the transformed standard deviation of the beta distribution
     sigma_sigma : standard deviation of the 1D Gaussian that samples the transformed standard deviation of the beta distribution
@@ -286,9 +304,9 @@ def bookstein_log_prior(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, sigma:flo
     """
     Returns the log-prior, taking into account Bookstein anchors.
     PARAMS:
-    _z : pre-hyperbolic transformed positions
+    _z : (N-D, D) latent positions
     _zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
-    sigma_beta_T : transformed standard deviations of the beta distribution
+    sigma_beta_T : transformed standard deviation of the beta distribution
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     mu_sigma : mean of the Gaussian of transformed sigma
     sigma_sigma : standard deviation of the Gaussian of transformed sigma
@@ -296,17 +314,17 @@ def bookstein_log_prior(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, sigma:flo
     """
     _zb_x_logprior = jstats.truncnorm.logpdf(_zb_x, a=0, b=jnp.inf, loc=-bookstein_dist, scale=sigma).sum() # Logprior for the node restricted in y = 0.
     _zb_y_logprior = jnp.log(2)+jstats.norm.logpdf(_z[0,:], loc=0, scale=sigma).sum() - jnp.inf*(_z[0,1] < 0) # Logprior for the node restricted in y>0 # Kan dit niet ook met een truncnorm?
-    rest_logprior = log_prior(_z[1:,:], sigma_beta_T, sigma, mu_sigma, sigma_sigma, overwrite_sigma) # Use all sigma_T's, not all _z values
+    rest_logprior = log_prior(_z[1:,:], sigma_beta_T, sigma, mu_sigma, sigma_sigma, overwrite_sigma) # Logprior of all non-anchor z values
     return rest_logprior + _zb_x_logprior + _zb_y_logprior
 
 def log_likelihood(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, obs_eps:float=obs_eps) -> float:
     """
     Returns the log-likelihood
     PARAMS:
-    _z : pre-hyperbolic transformed positions
-    sigma_beta_T : transformed standard deviations of the beta distribution
-    obs : observed correlations (samples x edges)
-    obs_eps : offset for clipping the observations, to insure 0 < correlations < 1
+    _z : (N, D) latent positions
+    sigma_beta_T : transformed standard deviation of the beta distribution
+    obs : (n_obs, M) observed correlations
+    obs_eps : offset for clipping the observations
     """
     params = get_det_params(_z, eps=eps)
     mu_beta, bound = params['mu_beta'], params['bound']
@@ -320,11 +338,11 @@ def log_likelihood_from_dist(d:ArrayLike, sigma_beta_T:float, obs:ArrayLike, eps
     """
     Returns the log-likelihood of the state from the given distances rather than positions
     PARAMS
-    dist : (M) upper triangle of the distance matrix
-    sigma_beta_T : transformed standard deviations of the beta distribution
-    obs : (n_obs x M) observed correlations
+    dist : (M,) upper triangle of the distance matrix
+    sigma_beta_T : transformed standard deviation of the beta distribution
+    obs : (n_obs, M) observed correlations
     eps : offset for clipping
-    obs_eps : offset for clipping the observations, to insure 0 < correlations < 1
+    obs_eps : offset for clipping the observations
     """
     mu_beta = jnp.clip(jnp.exp(-d**2), eps, 1 - eps)
     bound = jnp.sqrt(mu_beta*(1-mu_beta))
@@ -338,16 +356,16 @@ def bookstein_log_likelihood(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, obs:
     """
     Returns the log-likelihood given that _z is missing its Bookstein anchors
     PARAMS:
-    _z : x,y coordinates of the positions, without bookstein anchors
+    _z : (N-D, D) latent positions (without Bookstein anchors)
     _zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
-    sigma_beta_T : transformed standard deviations of the beta distribution
-    obs : observed correlations (samples x edges)
+    sigma_beta_T : transformed standard deviation of the beta distribution
+    obs : (n_obs, M) observed correlations
     bookstein_dist : offset of the first Bookstein anchor
     """
     n_dims = _z.shape[1]
     bookstein_anchors = get_bookstein_anchors(_zb_x, n_dims, bookstein_dist)
 
-    # Concatenate bookstein anchors to _z
+    ## Concatenate bookstein anchors to _z
     _zc = jnp.concatenate([bookstein_anchors, _z])
     return log_likelihood(_zc, sigma_beta_T, obs)
 
@@ -355,8 +373,8 @@ def log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, sigma:float=sig
     """
     Returns the log-probability density of the observed edge weights under the Continuous Hyperbolic LSM.
     PARAMS:
-    _z : positions on Euclidean plane (pre hyperbolic projection)
-    sigma_beta_T : transformed standard deviations of the beta distributions
+     _z : (N, D) latent positions
+    sigma_beta_T : transformed standard deviation of the beta distributions
     obs : observed correlations (samples x edges)
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane
     """
@@ -366,24 +384,24 @@ def log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, sigma:float=sig
 
 def bookstein_log_density(_z:ArrayLike, sigma_beta_T:float, obs:ArrayLike, _zb_x:float=None, sigma:float=sigma, is_full_state:bool=False) -> float:
     """
-    Returns the log-density using _z on Bookstein coordinates.
+    Returns the log-likelihood, taking Bookstein anchors into account.
     PARAMS:
-    _z : positions on Euclidean plane (pre hyperbolic projection)
-    sigma_beta_T : transformed standard deviations of the beta distributions
-    obs : observed correlations (samples x edges)
+    _z : (N-D, D) latent positions
+    sigma_beta_T : transformed standard deviation of the beta distributions
+    obs : (n_obs, M) observed correlations
     _zb_x : x-coordinate of the 2nd Bookstein anchor. Its y-coordinate is always 0.
     sigma : standard deviation of the 2D Gaussian that is projected to the hyperbolic plane.
     is_full_state : whether the _z is the full state (True) or the cut-off state used by SMC (False)
     """
     if is_full_state:
-        return bookstein_log_prior(_z[2:,:], _zb_x, sigma_beta_T, sigma) + log_likelihood(_z, sigma_beta_T, obs) # Skip first two nodes in the prior because they are not random variables, so treat them as though they are Bookstein'd
+        return bookstein_log_prior(_z[2:,:], _zb_x, sigma_beta_T, sigma) + log_likelihood(_z, sigma_beta_T, obs)
     else:
         return bookstein_log_prior(_z, _zb_x, sigma_beta_T, sigma) + bookstein_log_likelihood(_z, _zb_x, sigma_beta_T, obs)
 
 ## SMC + Bookstein methods
 def initialize_bkst_particles(key:PRNGKeyArray, num_particles:int, shape:tuple, sigma:float=sigma, mu_sigma:float=mu_sigma, sigma_sigma:float=sigma_sigma, bookstein_dist:float=bookstein_dist, overwrite_sigma:bool=False) -> Tuple[PRNGKeyArray, dict]:
     """
-    Initializes the SMC particles, but with Bookstein coordinates.
+    Initializes the SMC particles, taking Bookstein coordinates into account. Equivalent to sample_prior, but with an extra dimension for the SMC particles.
     PARAMS:
     key : random key for JAX functions
     num_particles : number of SMC particles
@@ -417,11 +435,10 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
     n_particles : number of SMC particles
     overwrite_sigma_val : value with which to overwrite sigma
     """
-    # Define smc+bkst sampler
     overwrite_sigma = overwrite_sigma_val is not None
 
-    # Define which paremeter sets are used for the prior/likelihood.
-    # Other parameters are taken from global parameters
+    ## Define distributions, allows user to overwrite sigma with a set value, which is then passed to the distribution definitions which also do not count it as an RV.
+    ## Other parameters are taken from global parameters
     if overwrite_sigma:
         _bookstein_log_prior = lambda state: bookstein_log_prior(**state, sigma_beta_T=overwrite_sigma_val, overwrite_sigma=True)
         _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs, sigma_beta_T=overwrite_sigma_val)
@@ -429,7 +446,8 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
         _bookstein_log_prior = lambda state: bookstein_log_prior(**state)
         _bookstein_log_likelihood = lambda state: bookstein_log_likelihood(**state, obs=obs)
 
-    n_vars = (N - D) * D + 1 + 1 - overwrite_sigma  # 1 for z_bx, 1 for sigma_beta_T (which we remove if we overwrite)
+    ## Define the SMC sampler
+    n_vars = (N - D) * D + 1 + 1 - overwrite_sigma # N-D x D-dimensional positions, +1 for the x-coord of the 2nd Bookstein anchor, +1 for sigma_beta_T (which we remove if we overwrite)
     rmh_parameters = {'sigma': rmh_sigma * jnp.eye(n_vars)}
     smc = bjx.adaptive_tempered_smc(
         logprior_fn=_bookstein_log_prior,
@@ -441,45 +459,14 @@ def get_LSM_embedding(key:PRNGKeyArray, obs:ArrayLike, N:int=N, D:int=D, rmh_sig
         mcmc_iter=n_mcmc_steps,
     )
 
-    # Initialize the particles
+    ## Initialize the particles
     key, init_position = initialize_bkst_particles(key, n_particles, (N, D), overwrite_sigma=overwrite_sigma)
     initial_smc_state = smc.init(init_position)
 
-    # bookstein_log_likelihood(_z:ArrayLike, _zb_x:float, sigma_beta_T:float, obs:ArrayLike, bookstein_dist:float=bookstein_dist)
-    # print('Initial prior:',bookstein_log_prior(init_position['_z'][0], init_position['_zb_x'][0], init_position['sigma_beta_T'][0]))
-    # print('Initial logll:',bookstein_log_likelihood(init_position['_z'][0], init_position['_zb_x'][0], init_position['sigma_beta_T'][0], obs))
-    #
-    # print('> 0/< 1',np.all(obs > 0 ), np.all(obs < 1))
-    #
-    # init_withbkst = add_bkst_to_smc_trace(deepcopy(initial_smc_state), bookstein_dist, D=D)
-    #
-    # filename = 'TESTPLOT.png'
-    # plt.figure()
-    # plt.imshow(triu2mat(obs[0]), cmap='bwr')
-    # plt.colorbar()
-    #
-    # # _z_positions = init_withbkst.particles['_z']
-    # # z_positions = lorentz_to_poincare(get_attribute_from_trace(_z_positions, get_det_params, 'z', shape=(n_particles, N, D + 1)))
-    # # plt.figure()
-    # # ax = plt.gca()
-    # # plot_posterior(z_positions,
-    # #                edges=np.mean(obs, axis=0),  # Average over 2 observations -> (M,)
-    # #                pos_labels=plt_labels,
-    # #                ax=ax,
-    # #                title=f"Proposal S{n_sub} {task}",
-    # #                hyperbolic=True,
-    # #                continuous=True,
-    # #                bkst=True,
-    # #                threshold=plot_threshold)
-    # # poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
-    # # ax.add_patch(poincare_disk)
-    # plt.savefig(filename, bbox_inches='tight')
-    # plt.close()
-
-    # Run SMC inference
+    ## Run SMC inference
     results = smc_bkst_inference_loop(key, smc.step, initial_smc_state)
 
-    # Add Bookstein coordinates to SMC states
+    ## Add Bookstein coordinates back to the SMC states
     states_rwm_smc = add_bkst_to_smc_trace(results[-1], bookstein_dist, D=D)
 
     if overwrite_sigma_val is None:
@@ -496,10 +483,10 @@ if __name__ == "__main__":
     For each subject/task, we take both encodings as seperate observations to create 1 embedding. 
     """
 
-    # Load labels
+    ## Load labels
     plt_labels = get_plt_labels(label_location, make_plot, no_labels, N)
 
-    # Load data
+    ## Load data
     if not overwrite_data_filename:
         data_filename = get_filename_with_ext(base_data_filename, partial, bpf, folder=data_folder)
     else:
@@ -509,7 +496,7 @@ if __name__ == "__main__":
 
     for si, n_sub in enumerate(range(subject1, subjectn+1)):
         for ti, task in enumerate(tasks):
-            # Create LS embedding
+            ## Create LS embedding
             start_time = time.time()
             results = get_LSM_embedding(key, obs[si, ti, :, :])  # Other parameters to get_LSM_embeddings are taken from globals.
             end_time = time.time()
@@ -521,14 +508,14 @@ if __name__ == "__main__":
             if do_print:
                 print(f'Embedded S{n_sub}_{task} in {n_iter} iterations')
 
-            # Save the statistics to the csv file (subject, task, n_particles, n_mcmc_steps, lml, runtime)
+            ## Save the statistics to the csv file (subject, task, n_particles, n_mcmc_steps, lml, runtime)
             if save_stats:
                 stats_row = [f'S{n_sub}', task, n_particles, n_mcmc_steps, lml, end_time - start_time]
                 with open(stats_filename, 'a', newline='') as f:
                     writer = csv.writer(f, delimiter=dl)
                     writer.writerow(stats_row)
 
-            # Save sigma values
+            ## Save sigma chain
             if save_sigma_chain:
                 filename = get_filename_with_ext(f"{save_sigma_filename}_S{n_sub}_{task}_{base_data_filename}", partial=partial, folder=get_safe_folder(f"{data_folder}/sbt_traces"))
                 with open(filename, 'wb') as f:
@@ -538,16 +525,15 @@ if __name__ == "__main__":
             set_sigma_txt = f"_sigma_set_{overwrite_sigma_val:.1f}" if overwrite_sigma_val is not None else ''
             base_save_filename = f"con_hyp_S{n_sub}_{task}_embedding_{base_data_filename}{partial_txt}{set_sigma_txt}"
 
+            ## Plot posterior
             if make_plot:
                 _z_positions = smc_embedding.particles['_z']
                 z_positions = lorentz_to_poincare(get_attribute_from_trace(_z_positions, get_det_params, 'z', shape=(n_particles, N, D+1)))
 
-                ## TODO: what is the proper way to show the edges, there are 2 observations
-                # Plot posterior
                 plt.figure()
                 ax = plt.gca()
                 plot_posterior(z_positions,
-                               edges=np.mean(obs[si, ti], axis=0), # Average over 2 observations -> (M,)
+                               edges=np.mean(obs[si, ti], axis=0),
                                pos_labels=plt_labels,
                                ax=ax,
                                title=f"Proposal S{n_sub} {task}",
@@ -557,7 +543,6 @@ if __name__ == "__main__":
                                threshold=plot_threshold)
                 poincare_disk = plt.Circle((0, 0), 1, color='k', fill=False, clip_on=False)
                 ax.add_patch(poincare_disk)
-                # Save figure
                 savefile = get_filename_with_ext(base_save_filename, ext='png', partial=partial, folder=figure_folder)
                 plt.savefig(savefile, bbox_inches='tight')
                 plt.close()
@@ -571,7 +556,7 @@ if __name__ == "__main__":
                 info_string = f"S{n_sub} Task {task} took {end_time-start_time:.4f}sec ({n_iter} iterations) with lml={jnp.sum(lml):.4f}\n"
                 f.write(info_string)
 
-        # Add an empty line between each subject in the info file
+        ## Add an empty line between each subject in the info file
         with open(info_filename, 'a') as f:
             f.write('\n')
 
