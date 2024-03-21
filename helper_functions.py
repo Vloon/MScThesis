@@ -148,6 +148,21 @@ def is_valid(x:ArrayLike) -> Tuple[bool, np.array]:
     """
     return jnp.all(jnp.isfinite(x)), jnp.where(jnp.logical_not(jnp.isfinite(x)))
 
+def create_task_file(filename:str, n_tasks:int, n_observations:int=1, delim:str=',') -> None:
+    """
+    Creates a task file which can later be used by load_observations. Used when creating simulated data. 
+    PARAMS:
+    filename : name of the task file
+    n_tasks : number of "tasks"
+    n_observations : number of observations
+    delim : delimiter between the tasks and observations in the task file
+    """
+    task_str = delim.join([f'T{i}' for i in range(n_tasks)])
+    obs_str = delim.join([f'obs{i}' for i in range(n_observations)])
+    with open(filename, 'w') as f:
+        f.write(f'{task_str}\n')
+        f.write(obs_str)
+
 def open_taskfile(task_filename:str) -> Tuple[list, list]:
     """
     Opens the task file and return the tasks and encodings in a list

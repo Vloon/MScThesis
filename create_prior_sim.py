@@ -15,7 +15,7 @@ from jax._src.typing import ArrayLike
 from typing import Callable, Tuple
 
 ## Self-made functions
-from helper_functions import get_cmd_params, set_GPU, open_taskfile, get_safe_folder, get_filename_with_ext, invlogit, is_valid
+from helper_functions import get_cmd_params, set_GPU, open_taskfile, get_safe_folder, get_filename_with_ext, invlogit, is_valid, create_task_file
 from plotting_functions import plot_correlations
 
 from binary_euclidean_LSM import sample_prior as bin_euc_sample_prior, sample_observation as bin_euc_sample_observation, get_det_params as bin_euc_det_params
@@ -124,20 +124,20 @@ overwrite_param_dict = {
                        }
 overwrite_params = overwrite_param_dict[f"{edge_type}_{geometry}"]
 
-def create_task_file(filename:str, n_tasks:int=n_tasks, n_observations:int=n_observations, delim:str=task_delimiter) -> None:
-    """
-    Creates a task file which can later be used by load_observations.
-    PARAMS:
-    filename : name of the task file
-    n_tasks : number of "tasks"
-    n_observations : number of observations
-    delim : delimiter between the tasks and observations in the task file
-    """
-    task_str = delim.join([f'T{i}' for i in range(n_tasks)])
-    obs_str = delim.join([f'obs{i}' for i in range(n_observations)])
-    with open(filename, 'w') as f:
-        f.write(f'{task_str}\n')
-        f.write(obs_str)
+# def create_task_file(filename:str, n_tasks:int=n_tasks, n_observations:int=n_observations, delim:str=task_delimiter) -> None:
+#     """
+#     Creates a task file which can later be used by load_observations.
+#     PARAMS:
+#     filename : name of the task file
+#     n_tasks : number of "tasks"
+#     n_observations : number of observations
+#     delim : delimiter between the tasks and observations in the task file
+#     """
+#     task_str = delim.join([f'T{i}' for i in range(n_tasks)])
+#     obs_str = delim.join([f'obs{i}' for i in range(n_observations)])
+#     with open(filename, 'w') as f:
+#         f.write(f'{task_str}\n')
+#         f.write(obs_str)
 
 def create_data(key:PRNGKeyArray,
                 shape:tuple = (N,D),
@@ -171,7 +171,7 @@ output_task_filename = get_filename_with_ext(task_filename, ext='txt', folder=ou
 data_filename = f"{base_data_filename}_N_{N}_n_obs_{n_observations}{sbt_txt}" 
 output_data_filename = get_filename_with_ext(data_filename, folder=output_folder)
 
-create_task_file(output_task_filename)
+create_task_file(output_task_filename, n_tasks, n_observations, task_delimiter)
 
 ## Text and color QOL
 ppt = {'bin':'binary', 'con':'continuous', 'euc':'Euclidean', 'hyp':'hyperbolic'}
